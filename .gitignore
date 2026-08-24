@@ -1,0 +1,30 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Local application data
+data/
+*.db
+*.db-shm
+*.db-wal
+backups/
+logs/
+
+# Go build and test output
+bin/
+dist/
+*.test
+coverage.out
+coverage.html
+
+# Editor and OS files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Workflow state
+.workflow/

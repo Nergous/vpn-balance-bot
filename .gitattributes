@@ -1,0 +1,30 @@
+# Normalize text files to LF in the repository.
+* text=auto
+
+# Keep source and configuration files as text.
+*.go text
+*.sql text
+*.md text
+*.yaml text
+*.yml text
+*.toml text
+*.editorconfig text
+*.service text
+
+# Shell scripts should use LF.
+*.sh text eol=lf
+
+# Windows scripts use CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Treat common binary assets as binary files.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.tar binary
+*.gz binary
