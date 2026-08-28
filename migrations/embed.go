@@ -1,0 +1,38 @@
+package migrations
+
+import (
+	_ "embed"
+	"sort"
+)
+
+type Migration struct {
+	Version string
+	SQL     string
+}
+
+//go:embed 000_schema_migrations.sql
+var schemaMigrationsSQL string
+
+var migrations = []Migration{
+	{
+		Version: "001_initial.sql",
+		SQL:     initialSQL,
+	},
+}
+
+//go:embed 001_initial.sql
+var initialSQL string
+
+func All() []Migration {
+	ret := make([]Migration, len(migrations))
+	copy(ret, migrations)
+	sort.Slice(ret, func(i, j int) bool {
+		return ret[i].Version < ret[j].Version
+	})
+	return ret
+}
+
+// SchemaMigrationsSQL returns the idempotent bootstrap schema for migration metadata.
+func SchemaMigrationsSQL() string {
+	return schemaMigrationsSQL
+}
