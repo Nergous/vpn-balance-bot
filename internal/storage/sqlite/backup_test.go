@@ -47,6 +47,25 @@ func TestBackupCreatesVerifiedSnapshot(t *testing.T) {
 	}
 }
 
+func TestBackupCancelledContextDoesNotPublishSnapshot(t *testing.T) {
+	store := newTestSQLite(t, context.Background())
+	if err := store.Migrate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "snapshot.db")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := store.Backup(ctx, path); err == nil {
+		t.Fatal("Backup() returned nil for cancelled context")
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("snapshot exists after cancelled backup: %v", err)
+	}
+	if _, err := os.Stat(path + ".tmp"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("temporary snapshot exists after cancelled backup: %v", err)
+	}
+}
+
 func snapshotUserCount(t *testing.T, ctx context.Context, path string) int {
 	t.Helper()
 	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path)+"?mode=ro")

@@ -52,10 +52,12 @@ func (s *Service) Process(ctx context.Context, today domain.Date) (int, error) {
 	}
 
 	delivered := 0
+	var processErrors []error
 	for _, user := range users {
 		balance, err := s.storage.Balance(ctx, user.ID)
 		if err != nil {
-			return delivered, fmt.Errorf("get balance for reminder user %d: %w", user.ID, err)
+			processErrors = append(processErrors, fmt.Errorf("get balance for reminder user %d: %w", user.ID, err))
+			continue
 		}
 		reminderType, ok := SelectAutomatic(user, balance, today)
 		if !ok {
@@ -63,13 +65,14 @@ func (s *Service) Process(ctx context.Context, today domain.Date) (int, error) {
 		}
 		created, err := s.Deliver(ctx, user, user.NextChargeOn, today, reminderType, automaticText(reminderType))
 		if err != nil {
-			return delivered, fmt.Errorf("deliver %s reminder to user %d: %w", reminderType, user.ID, err)
+			processErrors = append(processErrors, fmt.Errorf("deliver %s reminder to user %d: %w", reminderType, user.ID, err))
+			continue
 		}
 		if created {
 			delivered++
 		}
 	}
-	return delivered, nil
+	return delivered, errors.Join(processErrors...)
 }
 
 // Deliver reserves exactly one delivery key before sending it.
@@ -90,7 +93,7 @@ func (s *Service) Deliver(ctx context.Context, user domain.User, billingDate, sc
 
 	messageID, err := s.sender.SendReminder(ctx, *user.TelegramChatID, text)
 	if err != nil {
-		code := "delivery_failed"
+		code := string(classifyDeliveryError(s.sender, err))
 		delivery.Status = domain.ReminderStatusFailed
 		delivery.ErrorCode = &code
 		delivery.UpdatedAt = s.now().UTC().Truncate(time.Second)

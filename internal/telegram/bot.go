@@ -6,6 +6,8 @@ import (
 
 	"github.com/Nergous/vpn-balance-bot/internal/domain"
 	"github.com/Nergous/vpn-balance-bot/internal/service/account"
+	"github.com/Nergous/vpn-balance-bot/internal/service/reminder"
+	botapi "github.com/go-telegram/bot"
 )
 
 var ErrUnauthorized = errors.New("Telegram user is not linked")
@@ -55,6 +57,17 @@ func (b *Bot) Start(ctx context.Context) {
 // that serves user commands.
 func (b *Bot) SendReminder(ctx context.Context, chatID int64, text string) (int, error) {
 	return b.client.SendText(ctx, chatID, text)
+}
+
+func (b *Bot) ClassifyReminderError(err error) reminder.DeliveryErrorCode {
+	switch {
+	case errors.Is(err, botapi.ErrorForbidden):
+		return reminder.DeliveryErrorOffline
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+		return reminder.DeliveryErrorUnknown
+	default:
+		return reminder.DeliveryErrorFailed
+	}
 }
 
 func (b *Bot) send(ctx context.Context, chatID int64, text string) error {
