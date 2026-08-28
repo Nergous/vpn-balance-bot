@@ -50,6 +50,13 @@ func (b *Bot) Start(ctx context.Context) {
 		b.poller.Start(ctx)
 	}
 }
+
+// SendReminder implements reminder.Sender using the same Telegram transport
+// that serves user commands.
+func (b *Bot) SendReminder(ctx context.Context, chatID int64, text string) (int, error) {
+	return b.client.SendText(ctx, chatID, text)
+}
+
 func (b *Bot) send(ctx context.Context, chatID int64, text string) error {
 	_, err := b.client.SendText(ctx, chatID, text)
 	return err

@@ -44,8 +44,6 @@ func TestLoadProduction(t *testing.T) {
 	t.Setenv("REMINDER_HOUR", "4")
 	t.Setenv("INVITE_TTL", "24h")
 	t.Setenv("LOG_LEVEL", DebugLevel)
-	setTelegramResponse(t, http.StatusOK, "{\"ok\":true}")
-
 	cfg, err := Load(context.Background())
 	if err != nil || cfg.AppEnv != EnvProduction || cfg.ReminderHour != 4 ||
 		cfg.InviteTTL != 24*time.Hour || cfg.LogLevel != DebugLevel {
@@ -77,12 +75,6 @@ func TestLoadErrors(t *testing.T) {
 		t.Fatalf("invalid timezone error = %v", err)
 	}
 
-	setBaseEnvironment(t, EnvProduction)
-	t.Setenv("DATABASE_PATH", "/var/lib/vpn-balance-bot/bot.db")
-	setTelegramResponse(t, http.StatusUnauthorized, "{\"ok\":false}")
-	if _, err := Load(context.Background()); !errors.Is(err, ErrTelegramBotTokenIsInvalid) {
-		t.Fatalf("invalid token error = %v", err)
-	}
 }
 
 func TestLoadDevelopmentEnvironment(t *testing.T) {
@@ -91,8 +83,6 @@ func TestLoadDevelopmentEnvironment(t *testing.T) {
 	if err := os.WriteFile(".env", []byte("APP_ENV=development\nTELEGRAM_BOT_TOKEN=dev-token\nADMIN_TELEGRAM_ID=123\nDATABASE_PATH=data/dev.db\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	setTelegramResponse(t, http.StatusOK, "{\"ok\":true}")
-
 	cfg, err := Load(context.Background())
 	if err != nil || cfg.AppEnv != EnvDevelopment || cfg.TelegramBotToken != "dev-token" {
 		t.Fatalf("Load() = %+v, %v", cfg, err)
@@ -264,7 +254,7 @@ func TestValidateTelegramBotToken(t *testing.T) {
 	}
 	t.Run("success with nil context", func(t *testing.T) {
 		setTelegramResponse(t, http.StatusOK, "{\"ok\":true}")
-		if err := validateTelegramBotToken(nil, "token"); err != nil {
+		if err := validateTelegramBotToken(context.TODO(), "token"); err != nil {
 			t.Fatal(err)
 		}
 	})

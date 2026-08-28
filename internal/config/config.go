@@ -44,7 +44,8 @@ type Config struct {
 	InviteTTL        time.Duration
 	LogLevel         string
 	AppEnv           string
-	Timeout          time.Duration
+	HTTPTimeout      time.Duration
+	DBTimeout        time.Duration
 }
 
 // Load reads and validates configuration. It does not contact Telegram in test mode.
@@ -68,12 +69,6 @@ func Load(ctx context.Context) (*Config, error) {
 
 	if err := validateConfig(cfg); err != nil {
 		return nil, err
-	}
-
-	if appEnv != EnvTest {
-		if err := validateTelegramBotToken(ctx, cfg.TelegramBotToken); err != nil {
-			return nil, err
-		}
 	}
 
 	return cfg, nil
@@ -121,7 +116,12 @@ func readConfig(appEnv string) (*Config, error) {
 		return nil, err
 	}
 
-	timeout, err := optionalDuration("TIMEOUT", 30*time.Second)
+	httpTimeout, err := optionalDuration("HTTP_TIMEOUT", 30*time.Second)
+	if err != nil {
+		return nil, err
+	}
+
+	dbTimeout, err := optionalDuration("DB_TIMEOUT", 30*time.Second)
 	if err != nil {
 		return nil, err
 	}
@@ -135,7 +135,8 @@ func readConfig(appEnv string) (*Config, error) {
 		InviteTTL:        inviteTTL,
 		LogLevel:         strings.ToUpper(optionalString("LOG_LEVEL", InfoLevel)),
 		AppEnv:           appEnv,
-		Timeout:          timeout,
+		HTTPTimeout:      httpTimeout,
+		DBTimeout:        dbTimeout,
 	}, nil
 }
 
