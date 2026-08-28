@@ -27,16 +27,24 @@ type AdminAccountService interface {
 	AddAdjustment(context.Context, account.AddAdjustmentParams) (domain.LedgerEntry, error)
 	ReverseLedgerEntry(context.Context, account.ReverseLedgerEntryParams) (domain.LedgerEntry, error)
 }
-
-type Admin struct {
-	client   Client
-	accounts AdminAccountService
-	adminID  int64
-	wizard   *Wizard
+type AdminReminderService interface {
+	DeliverManual(context.Context, domain.User, string) (bool, error)
 }
 
-func NewAdmin(client Client, accounts AdminAccountService, adminID int64) *Admin {
-	return &Admin{client: client, accounts: accounts, adminID: adminID, wizard: NewWizard()}
+type Admin struct {
+	client    Client
+	accounts  AdminAccountService
+	adminID   int64
+	wizard    *Wizard
+	reminders AdminReminderService
+}
+
+func NewAdmin(client Client, accounts AdminAccountService, adminID int64, reminders ...AdminReminderService) *Admin {
+	admin := &Admin{client: client, accounts: accounts, adminID: adminID, wizard: NewWizard()}
+	if len(reminders) > 0 {
+		admin.reminders = reminders[0]
+	}
+	return admin
 }
 func (a *Admin) authorized(userID int64) bool { return userID == a.adminID }
 func (a *Admin) reject(ctx context.Context, chatID int64) error {
@@ -53,6 +61,20 @@ func (a *Admin) CreateInvite(ctx context.Context, message IncomingMessage, userI
 		return err
 	}
 	_, err = a.client.SendText(ctx, message.ChatID, "Invite token: "+token)
+	return err
+}
+func (a *Admin) RemindNow(ctx context.Context, message IncomingMessage, userID domain.UserID, text string) error {
+	if !a.authorized(message.UserID) {
+		return a.reject(ctx, message.ChatID)
+	}
+	if a.reminders == nil {
+		return errors.New("manual reminder service is not configured")
+	}
+	user, err := a.accounts.UserByID(ctx, userID)
+	if err != nil {
+		return err
+	}
+	_, err = a.reminders.DeliverManual(ctx, user, text)
 	return err
 }
 func (a *Admin) Dashboard(ctx context.Context, message IncomingMessage) error {
@@ -239,6 +261,16 @@ func (b *Bot) HandleAdminCommand(ctx context.Context, message IncomingMessage) e
 		return b.admin.ConfirmPayment(ctx, message)
 	case "cancel":
 		return b.admin.CancelWizard(ctx, message)
+	case "remind":
+		userID, err := adminUserID(parts, 2)
+		if err != nil {
+			return b.send(ctx, message.ChatID, err.Error())
+		}
+		text := strings.TrimSpace(strings.Join(parts[3:], " "))
+		if text == "" {
+			return b.send(ctx, message.ChatID, "Используйте: /admin remind <user-id> <text>")
+		}
+		return b.admin.RemindNow(ctx, message, userID, text)
 	default:
 		return b.send(ctx, message.ChatID, "Команды: /admin, /admin users [status], /admin invite <id>, /admin payment <id> <amount> [note], /admin confirm, /admin cancel")
 	}

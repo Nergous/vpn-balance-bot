@@ -54,8 +54,8 @@ func (f *fakeTelegram) Start(ctx context.Context) {
 	close(f.started)
 	<-ctx.Done()
 }
-func (f *fakeTelegram) SendReminder(context.Context, int64, string) (int, error) { return 0, nil }
-func (f *fakeTelegram) EnableAdmin(int64) error                                  { return nil }
+func (f *fakeTelegram) SendReminder(context.Context, int64, string) (int, error)  { return 0, nil }
+func (f *fakeTelegram) EnableAdmin(int64, ...telegram.AdminReminderService) error { return nil }
 
 type fakeScheduler struct {
 	started chan struct{}

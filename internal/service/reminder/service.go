@@ -75,6 +75,16 @@ func (s *Service) Process(ctx context.Context, today domain.Date) (int, error) {
 	return delivered, errors.Join(processErrors...)
 }
 
+// DeliverManual sends an explicit admin-requested reminder through the same
+// reservation and result-recording path as automatic deliveries.
+func (s *Service) DeliverManual(ctx context.Context, user domain.User, text string) (bool, error) {
+	today, err := domain.DateFromTime(s.now().UTC(), time.UTC)
+	if err != nil {
+		return false, err
+	}
+	return s.Deliver(ctx, user, user.NextChargeOn, today, domain.ReminderTypeManual, text)
+}
+
 // Deliver reserves exactly one delivery key before sending it.
 func (s *Service) Deliver(ctx context.Context, user domain.User, billingDate, scheduledDate domain.Date, reminderType domain.ReminderType, text string) (bool, error) {
 	if user.TelegramChatID == nil {

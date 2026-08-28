@@ -50,12 +50,12 @@ func NewWithClient(client Client, accounts AccountService) *Bot {
 }
 
 // EnableAdmin binds admin-only handlers to the configured numeric Telegram ID.
-func (b *Bot) EnableAdmin(adminID int64) error {
+func (b *Bot) EnableAdmin(adminID int64, reminders ...AdminReminderService) error {
 	accounts, ok := b.accounts.(AdminAccountService)
 	if !ok {
 		return errors.New("account service does not support admin operations")
 	}
-	b.admin = NewAdmin(b.client, accounts, adminID)
+	b.admin = NewAdmin(b.client, accounts, adminID, reminders...)
 	return nil
 }
 func (b *Bot) Start(ctx context.Context) {
