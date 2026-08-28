@@ -240,6 +240,99 @@ func (b *Bot) HandleAdminCommand(ctx context.Context, message IncomingMessage) e
 			return b.send(ctx, message.ChatID, err.Error())
 		}
 		return b.admin.CreateInvite(ctx, message, userID)
+	case "user":
+		userID, err := adminUserID(parts, 2)
+		if err != nil {
+			return b.send(ctx, message.ChatID, err.Error())
+		}
+		return b.admin.UserCard(ctx, message, userID)
+	case "create":
+		if len(parts) != 6 {
+			return b.send(ctx, message.ChatID, "Используйте: /admin create <name> <fee> <anchor-day> <next-charge YYYY-MM-DD>")
+		}
+		fee, err := strconv.ParseInt(parts[3], 10, 64)
+		if err != nil {
+			return b.send(ctx, message.ChatID, "Тариф должен быть целым числом копеек.")
+		}
+		anchor, err := strconv.Atoi(parts[4])
+		if err != nil {
+			return b.send(ctx, message.ChatID, "Anchor day должен быть числом.")
+		}
+		next, err := domain.ParseDate(parts[5])
+		if err != nil {
+			return b.send(ctx, message.ChatID, "Неверная дата следующего списания.")
+		}
+		_, err = b.admin.CreateUser(ctx, message, account.CreateUserParams{DisplayName: parts[2], MonthlyFeeMinor: domain.AmountMinor(fee), Currency: "RUB", BillingAnchorDay: anchor, NextChargeOn: next})
+		return err
+	case "pause", "disable":
+		userID, err := adminUserID(parts, 2)
+		if err != nil {
+			return b.send(ctx, message.ChatID, err.Error())
+		}
+		if parts[1] == "pause" {
+			return b.admin.Pause(ctx, message, userID)
+		}
+		return b.admin.Disable(ctx, message, userID)
+	case "resume":
+		userID, err := adminUserID(parts, 2)
+		if err != nil {
+			return b.send(ctx, message.ChatID, err.Error())
+		}
+		if len(parts) != 4 {
+			return b.send(ctx, message.ChatID, "Используйте: /admin resume <user-id> <YYYY-MM-DD>")
+		}
+		next, err := domain.ParseDate(parts[3])
+		if err != nil {
+			return b.send(ctx, message.ChatID, "Неверная дата следующего списания.")
+		}
+		return b.admin.Resume(ctx, message, account.ResumeParams{UserID: userID, NextChargeOn: &next})
+	case "fee":
+		userID, err := adminUserID(parts, 2)
+		if err != nil {
+			return b.send(ctx, message.ChatID, err.Error())
+		}
+		if len(parts) != 4 {
+			return b.send(ctx, message.ChatID, "Используйте: /admin fee <user-id> <amount>")
+		}
+		fee, err := strconv.ParseInt(parts[3], 10, 64)
+		if err != nil {
+			return b.send(ctx, message.ChatID, "Сумма должна быть целым числом копеек.")
+		}
+		return b.admin.ChangeFee(ctx, message, account.ChangeMonthlyFeeParams{UserID: userID, MonthlyFeeMinor: domain.AmountMinor(fee)})
+	case "opening", "adjustment":
+		userID, err := adminUserID(parts, 2)
+		if err != nil {
+			return b.send(ctx, message.ChatID, err.Error())
+		}
+		if len(parts) < 4 {
+			return b.send(ctx, message.ChatID, "Укажите сумму в копейках.")
+		}
+		amount, err := strconv.ParseInt(parts[3], 10, 64)
+		if err != nil {
+			return b.send(ctx, message.ChatID, "Сумма должна быть целым числом копеек.")
+		}
+		note := strings.TrimSpace(strings.Join(parts[4:], " "))
+		if parts[1] == "opening" {
+			var p *string
+			if note != "" {
+				p = &note
+			}
+			return b.admin.AddOpeningBalance(ctx, message, account.AddOpeningBalanceParams{UserID: userID, AmountMinor: domain.AmountMinor(amount), Note: p})
+		}
+		return b.admin.AddAdjustment(ctx, message, account.AddAdjustmentParams{UserID: userID, AmountMinor: domain.AmountMinor(amount), Note: note})
+	case "reverse":
+		userID, err := adminUserID(parts, 2)
+		if err != nil {
+			return b.send(ctx, message.ChatID, err.Error())
+		}
+		if len(parts) < 5 {
+			return b.send(ctx, message.ChatID, "Используйте: /admin reverse <user-id> <entry-id> <comment>")
+		}
+		entryID, err := strconv.ParseInt(parts[3], 10, 64)
+		if err != nil {
+			return b.send(ctx, message.ChatID, "Entry ID должен быть числом.")
+		}
+		return b.admin.Reverse(ctx, message, account.ReverseLedgerEntryParams{UserID: userID, EntryID: entryID, Note: strings.Join(parts[4:], " ")})
 	case "payment":
 		if len(parts) < 4 {
 			return b.send(ctx, message.ChatID, "Используйте: /admin payment <user-id> <amount> [note]")
