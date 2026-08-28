@@ -36,5 +36,6 @@ func main() {
 			"application stopped",
 			slog.Any("error", err),
 		)
+		os.Exit(1)
 	}
 }
