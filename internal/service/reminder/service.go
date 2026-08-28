@@ -3,6 +3,7 @@ package reminder
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/Nergous/vpn-balance-bot/internal/domain"
@@ -32,6 +33,43 @@ func New(storage Storage, sender Sender) (*Service, error) {
 // RecoverPending marks deliveries left pending by a prior process as unknown.
 func (s *Service) RecoverPending(ctx context.Context) (int, error) {
 	return s.storage.MarkPendingUnknown(ctx, s.now().UTC().Truncate(time.Second))
+}
+
+// Process recovers interrupted deliveries and sends the one automatic reminder
+// applicable to each active user for today. Delivery reservation makes retries safe.
+func (s *Service) Process(ctx context.Context, today domain.Date) (int, error) {
+	if !today.IsValid() {
+		return 0, domain.ErrInvalidDate
+	}
+	if _, err := s.RecoverPending(ctx); err != nil {
+		return 0, fmt.Errorf("recover pending reminder deliveries: %w", err)
+	}
+
+	status := domain.UserStatusActive
+	users, err := s.storage.ListUsers(ctx, &status)
+	if err != nil {
+		return 0, fmt.Errorf("list active reminder users: %w", err)
+	}
+
+	delivered := 0
+	for _, user := range users {
+		balance, err := s.storage.Balance(ctx, user.ID)
+		if err != nil {
+			return delivered, fmt.Errorf("get balance for reminder user %d: %w", user.ID, err)
+		}
+		reminderType, ok := SelectAutomatic(user, balance, today)
+		if !ok {
+			continue
+		}
+		created, err := s.Deliver(ctx, user, user.NextChargeOn, today, reminderType, automaticText(reminderType))
+		if err != nil {
+			return delivered, fmt.Errorf("deliver %s reminder to user %d: %w", reminderType, user.ID, err)
+		}
+		if created {
+			delivered++
+		}
+	}
+	return delivered, nil
 }
 
 // Deliver reserves exactly one delivery key before sending it.
@@ -68,4 +106,19 @@ func (s *Service) Deliver(ctx context.Context, user domain.User, billingDate, sc
 		return false, err
 	}
 	return true, nil
+}
+
+func automaticText(reminderType domain.ReminderType) string {
+	switch reminderType {
+	case domain.ReminderTypeBeforeCharge:
+		return "Your subscription charge is due in 3 days."
+	case domain.ReminderTypeChargeDebt:
+		return "Your subscription charge was applied. Please top up your balance."
+	case domain.ReminderTypeOverdue3D:
+		return "Your balance has been overdue for 3 days. Please top up your balance."
+	case domain.ReminderTypeOverdue7D:
+		return "Your balance has been overdue for 7 days. Please top up your balance."
+	default:
+		return "Please top up your balance."
+	}
 }
