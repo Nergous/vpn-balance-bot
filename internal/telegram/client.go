@@ -35,12 +35,18 @@ func newProductionBot(token string, adapter *Bot) (*productionClient, error) {
 		botapi.WithMessageTextHandler("status", botapi.MatchTypeCommand, adapter.statusUpdate),
 		botapi.WithMessageTextHandler("history", botapi.MatchTypeCommand, adapter.historyUpdate),
 		botapi.WithMessageTextHandler("help", botapi.MatchTypeCommand, adapter.helpUpdate),
+		botapi.WithMessageTextHandler("admin", botapi.MatchTypeCommand, adapter.adminUpdate),
 		botapi.WithCallbackQueryDataHandler("user_", botapi.MatchTypePrefix, adapter.callbackUpdate),
 	)
 	if err != nil {
 		return nil, ErrInitialize
 	}
 	return &productionClient{bot: b}, nil
+}
+func (b *Bot) adminUpdate(ctx context.Context, _ *botapi.Bot, update *models.Update) {
+	if update.Message != nil {
+		_ = b.HandleAdminCommand(ctx, IncomingMessage{ChatID: update.Message.Chat.ID, UserID: update.Message.From.ID, Text: update.Message.Text})
+	}
 }
 
 func (b *Bot) startUpdate(ctx context.Context, _ *botapi.Bot, update *models.Update) {

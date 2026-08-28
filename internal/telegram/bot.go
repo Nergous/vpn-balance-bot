@@ -32,6 +32,7 @@ type Bot struct {
 	client   Client
 	poller   poller
 	accounts AccountService
+	admin    *Admin
 }
 
 func New(token string, accounts AccountService) (*Bot, error) {
@@ -46,6 +47,16 @@ func New(token string, accounts AccountService) (*Bot, error) {
 
 func NewWithClient(client Client, accounts AccountService) *Bot {
 	return &Bot{client: client, accounts: accounts}
+}
+
+// EnableAdmin binds admin-only handlers to the configured numeric Telegram ID.
+func (b *Bot) EnableAdmin(adminID int64) error {
+	accounts, ok := b.accounts.(AdminAccountService)
+	if !ok {
+		return errors.New("account service does not support admin operations")
+	}
+	b.admin = NewAdmin(b.client, accounts, adminID)
+	return nil
 }
 func (b *Bot) Start(ctx context.Context) {
 	if b.poller != nil {

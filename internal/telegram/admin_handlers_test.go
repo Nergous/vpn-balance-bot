@@ -47,8 +47,47 @@ func TestAdminDashboardAndCreateUser(t *testing.T) {
 	}
 }
 
+func TestAdminCommandRouterAuthorizesAndConfirmsPaymentOnce(t *testing.T) {
+	client := &testutil.FakeTelegramClient{}
+	service := &fakeAdmin{}
+	bot := NewWithClient(client, service)
+	if err := bot.EnableAdmin(1); err != nil {
+		t.Fatal(err)
+	}
+	if err := bot.HandleAdminCommand(context.Background(), IncomingMessage{ChatID: 2, UserID: 2, Text: "/admin payment 7 100"}); err != nil {
+		t.Fatal(err)
+	}
+	if service.paymentCalls != 0 {
+		t.Fatal("non-admin command reached payment service")
+	}
+	if err := bot.HandleAdminCommand(context.Background(), IncomingMessage{ChatID: 1, UserID: 1, Text: "/admin payment 7 100 note"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := bot.HandleAdminCommand(context.Background(), IncomingMessage{ChatID: 1, UserID: 1, Text: "/admin confirm"}); err != nil {
+		t.Fatal(err)
+	}
+	if service.paymentCalls != 1 {
+		t.Fatalf("payment calls = %d", service.paymentCalls)
+	}
+	if err := bot.HandleAdminCommand(context.Background(), IncomingMessage{ChatID: 1, UserID: 1, Text: "/admin confirm"}); !errors.Is(err, ErrWizardNotFound) {
+		t.Fatalf("second confirmation = %v", err)
+	}
+}
+
 type fakeAdmin struct{ pauseCalls, paymentCalls int }
 
+func (f *fakeAdmin) ConsumeInviteToken(context.Context, account.ConsumeInviteParams) (domain.User, error) {
+	return domain.User{}, nil
+}
+func (f *fakeAdmin) UserByTelegramID(context.Context, int64) (domain.User, error) {
+	return domain.User{}, nil
+}
+func (f *fakeAdmin) Balance(context.Context, domain.UserID) (domain.AmountMinor, error) {
+	return 0, nil
+}
+func (f *fakeAdmin) LastLedgerEntries(context.Context, domain.UserID) ([]domain.LedgerEntry, error) {
+	return nil, nil
+}
 func (f *fakeAdmin) CreateUser(context.Context, account.CreateUserParams) (domain.User, error) {
 	return domain.User{}, nil
 }

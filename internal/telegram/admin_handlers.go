@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/Nergous/vpn-balance-bot/internal/domain"
 	"github.com/Nergous/vpn-balance-bot/internal/service/account"
@@ -183,4 +185,72 @@ func (a *Admin) Reverse(ctx context.Context, message IncomingMessage, params acc
 	params.AdminTelegramID = message.UserID
 	_, err := a.accounts.ReverseLedgerEntry(ctx, params)
 	return err
+}
+
+// HandleAdminCommand is the production command boundary for admin scenarios.
+// Supported forms: /admin; /admin users [status]; /admin invite <user-id>;
+// /admin payment <user-id> <amount> [note]; /admin confirm; /admin cancel.
+func (b *Bot) HandleAdminCommand(ctx context.Context, message IncomingMessage) error {
+	if b.admin == nil {
+		return b.send(ctx, message.ChatID, "Админ-панель не настроена.")
+	}
+	if !b.admin.authorized(message.UserID) {
+		return b.admin.reject(ctx, message.ChatID)
+	}
+	parts := strings.Fields(message.Text)
+	if len(parts) <= 1 {
+		return b.admin.Dashboard(ctx, message)
+	}
+	switch parts[1] {
+	case "users":
+		var filter account.UserFilter
+		if len(parts) == 3 {
+			status := domain.UserStatus(parts[2])
+			if !status.IsValid() {
+				return b.send(ctx, message.ChatID, "Статус: active, paused или disabled.")
+			}
+			filter.Status = &status
+		}
+		return b.admin.Users(ctx, message, filter)
+	case "invite":
+		userID, err := adminUserID(parts, 2)
+		if err != nil {
+			return b.send(ctx, message.ChatID, err.Error())
+		}
+		return b.admin.CreateInvite(ctx, message, userID)
+	case "payment":
+		if len(parts) < 4 {
+			return b.send(ctx, message.ChatID, "Используйте: /admin payment <user-id> <amount> [note]")
+		}
+		userID, err := adminUserID(parts, 2)
+		if err != nil {
+			return b.send(ctx, message.ChatID, err.Error())
+		}
+		amount, err := strconv.ParseInt(parts[3], 10, 64)
+		if err != nil {
+			return b.send(ctx, message.ChatID, "Сумма должна быть целым числом копеек.")
+		}
+		var note *string
+		if value := strings.TrimSpace(strings.Join(parts[4:], " ")); value != "" {
+			note = &value
+		}
+		return b.admin.BeginPayment(ctx, message, PaymentDraft{UserID: userID, AmountMinor: domain.AmountMinor(amount), Note: note})
+	case "confirm":
+		return b.admin.ConfirmPayment(ctx, message)
+	case "cancel":
+		return b.admin.CancelWizard(ctx, message)
+	default:
+		return b.send(ctx, message.ChatID, "Команды: /admin, /admin users [status], /admin invite <id>, /admin payment <id> <amount> [note], /admin confirm, /admin cancel")
+	}
+}
+
+func adminUserID(parts []string, index int) (domain.UserID, error) {
+	if len(parts) <= index {
+		return 0, errors.New("Не указан user ID.")
+	}
+	value, err := strconv.ParseInt(parts[index], 10, 64)
+	if err != nil || value <= 0 {
+		return 0, errors.New("User ID должен быть положительным числом.")
+	}
+	return domain.UserID(value), nil
 }

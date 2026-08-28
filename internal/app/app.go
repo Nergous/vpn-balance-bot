@@ -19,6 +19,7 @@ import (
 type telegramRuntime interface {
 	reminder.Sender
 	Start(context.Context)
+	EnableAdmin(int64) error
 }
 
 type schedulerRuntime interface{ Start(context.Context) }
@@ -78,6 +79,9 @@ func (a *App) Run(ctx context.Context) error {
 	bot, err := a.newTelegram(a.cfg.TelegramBotToken, accounts)
 	if err != nil {
 		return fmt.Errorf("create Telegram bot: %w", err)
+	}
+	if err := bot.EnableAdmin(a.cfg.AdminTelegramID); err != nil {
+		return fmt.Errorf("enable Telegram admin handlers: %w", err)
 	}
 	reminderService, err := reminder.New(s, bot)
 	if err != nil {
