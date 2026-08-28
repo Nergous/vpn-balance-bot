@@ -66,6 +66,44 @@ func TestBackupCancelledContextDoesNotPublishSnapshot(t *testing.T) {
 	}
 }
 
+func TestBackupExcludesUncommittedChanges(t *testing.T) {
+	ctx := context.Background()
+	store := newTestSQLite(t, ctx)
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	date, _ := domain.NewDate(2026, time.September, 1)
+	now := time.Now().UTC()
+	if _, err := store.CreateUser(ctx, domain.User{DisplayName: "Committed", MonthlyFeeMinor: 100, Currency: "RUB", BillingAnchorDay: 1, NextChargeOn: date, Status: domain.UserStatusActive, CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	var sequence int
+	var name, sourcePath string
+	if err := store.db.QueryRowContext(ctx, "PRAGMA database_list").Scan(&sequence, &name, &sourcePath); err != nil {
+		t.Fatal(err)
+	}
+	writer, err := sql.Open("sqlite", "file:"+filepath.ToSlash(sourcePath)+"?mode=rw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	tx, err := writer.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO users (display_name, monthly_fee_minor, currency, billing_anchor_day, next_charge_on, status, created_at, updated_at) VALUES ('Uncommitted', 100, 'RUB', 1, '2026-09-01', 'active', 0, 0)`); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "snapshot.db")
+	if err := store.Backup(ctx, path); err != nil {
+		t.Fatal(err)
+	}
+	if got := snapshotUserCount(t, ctx, path); got != 1 {
+		t.Fatalf("snapshot users = %d, want committed users only", got)
+	}
+}
+
 func snapshotUserCount(t *testing.T, ctx context.Context, path string) int {
 	t.Helper()
 	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path)+"?mode=ro")
