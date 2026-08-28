@@ -74,6 +74,25 @@ func TestAdminCommandRouterAuthorizesAndConfirmsPaymentOnce(t *testing.T) {
 	}
 }
 
+func TestAdminManualReminderRequiresAdminAndUsesReminderService(t *testing.T) {
+	client := &testutil.FakeTelegramClient{}
+	service := &fakeAdmin{}
+	reminders := &fakeAdminReminders{}
+	admin := NewAdmin(client, service, 1, reminders)
+	if err := admin.RemindNow(context.Background(), IncomingMessage{ChatID: 2, UserID: 2}, 7, "top up"); err != nil {
+		t.Fatal(err)
+	}
+	if reminders.calls != 0 {
+		t.Fatal("non-admin reached reminder service")
+	}
+	if err := admin.RemindNow(context.Background(), IncomingMessage{ChatID: 1, UserID: 1}, 7, "top up"); err != nil {
+		t.Fatal(err)
+	}
+	if reminders.calls != 1 || reminders.user.ID != 7 || reminders.text != "top up" {
+		t.Fatalf("reminder = %#v", reminders)
+	}
+}
+
 type fakeAdmin struct{ pauseCalls, paymentCalls int }
 
 func (f *fakeAdmin) ConsumeInviteToken(context.Context, account.ConsumeInviteParams) (domain.User, error) {
@@ -91,8 +110,8 @@ func (f *fakeAdmin) LastLedgerEntries(context.Context, domain.UserID) ([]domain.
 func (f *fakeAdmin) CreateUser(context.Context, account.CreateUserParams) (domain.User, error) {
 	return domain.User{}, nil
 }
-func (f *fakeAdmin) UserByID(context.Context, domain.UserID) (domain.User, error) {
-	return domain.User{}, nil
+func (f *fakeAdmin) UserByID(_ context.Context, userID domain.UserID) (domain.User, error) {
+	return domain.User{ID: userID}, nil
 }
 func (f *fakeAdmin) ListUsers(context.Context, account.UserFilter) ([]domain.User, error) {
 	return nil, nil
@@ -125,4 +144,16 @@ func (f *fakeAdmin) AddAdjustment(context.Context, account.AddAdjustmentParams) 
 }
 func (f *fakeAdmin) ReverseLedgerEntry(context.Context, account.ReverseLedgerEntryParams) (domain.LedgerEntry, error) {
 	return domain.LedgerEntry{}, nil
+}
+
+type fakeAdminReminders struct {
+	calls int
+	user  domain.User
+	text  string
+}
+
+func (f *fakeAdminReminders) DeliverManual(_ context.Context, user domain.User, text string) (bool, error) {
+	f.calls++
+	f.user, f.text = user, text
+	return true, nil
 }
