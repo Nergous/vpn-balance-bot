@@ -19,4 +19,8 @@ type Storage interface {
 	DisableUser(ctx context.Context, userID domain.UserID, updatedAt time.Time) (domain.User, error)
 	CreateInviteToken(ctx context.Context, record CreateInviteTokenRecord) error
 	ConsumeInviteToken(ctx context.Context, record ConsumeInviteTokenRecord) (domain.User, error)
+	CreateLedgerEntry(ctx context.Context, entry domain.LedgerEntry) (domain.LedgerEntry, error)
+	Balance(ctx context.Context, userID domain.UserID) (domain.AmountMinor, error)
+	LastLedgerEntries(ctx context.Context, userID domain.UserID, limit int) ([]domain.LedgerEntry, error)
+	ReverseLedgerEntry(ctx context.Context, record ReverseLedgerEntryRecord) (domain.LedgerEntry, error)
 }

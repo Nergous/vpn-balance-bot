@@ -238,6 +238,10 @@ type fakeStorage struct {
 	disableUser        func(context.Context, domain.UserID, time.Time) (domain.User, error)
 	createInviteToken  func(context.Context, CreateInviteTokenRecord) error
 	consumeInviteToken func(context.Context, ConsumeInviteTokenRecord) (domain.User, error)
+	createLedgerEntry  func(context.Context, domain.LedgerEntry) (domain.LedgerEntry, error)
+	balance            func(context.Context, domain.UserID) (domain.AmountMinor, error)
+	lastLedgerEntries  func(context.Context, domain.UserID, int) ([]domain.LedgerEntry, error)
+	reverseLedgerEntry func(context.Context, ReverseLedgerEntryRecord) (domain.LedgerEntry, error)
 	listUsersCalled    bool
 }
 
@@ -312,6 +316,34 @@ func (f *fakeStorage) ConsumeInviteToken(ctx context.Context, record ConsumeInvi
 		return domain.User{}, errors.New("unexpected ConsumeInviteToken call")
 	}
 	return f.consumeInviteToken(ctx, record)
+}
+
+func (f *fakeStorage) CreateLedgerEntry(ctx context.Context, entry domain.LedgerEntry) (domain.LedgerEntry, error) {
+	if f.createLedgerEntry == nil {
+		return domain.LedgerEntry{}, errors.New("unexpected CreateLedgerEntry call")
+	}
+	return f.createLedgerEntry(ctx, entry)
+}
+
+func (f *fakeStorage) Balance(ctx context.Context, userID domain.UserID) (domain.AmountMinor, error) {
+	if f.balance == nil {
+		return 0, errors.New("unexpected Balance call")
+	}
+	return f.balance(ctx, userID)
+}
+
+func (f *fakeStorage) LastLedgerEntries(ctx context.Context, userID domain.UserID, limit int) ([]domain.LedgerEntry, error) {
+	if f.lastLedgerEntries == nil {
+		return nil, errors.New("unexpected LastLedgerEntries call")
+	}
+	return f.lastLedgerEntries(ctx, userID, limit)
+}
+
+func (f *fakeStorage) ReverseLedgerEntry(ctx context.Context, record ReverseLedgerEntryRecord) (domain.LedgerEntry, error) {
+	if f.reverseLedgerEntry == nil {
+		return domain.LedgerEntry{}, errors.New("unexpected ReverseLedgerEntry call")
+	}
+	return f.reverseLedgerEntry(ctx, record)
 }
 
 func testDate(t *testing.T, year int, month time.Month, day int) domain.Date {

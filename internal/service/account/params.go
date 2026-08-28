@@ -57,3 +57,45 @@ type ConsumeInviteTokenRecord struct {
 	TelegramChatID int64
 	ConsumedAt     time.Time
 }
+
+// AddOpeningBalanceParams records the signed balance before regular billing begins.
+type AddOpeningBalanceParams struct {
+	UserID          domain.UserID
+	AmountMinor     domain.AmountMinor
+	AdminTelegramID int64
+	Note            *string
+}
+
+// AddPaymentParams records a positive manual payment.
+type AddPaymentParams struct {
+	UserID          domain.UserID
+	AmountMinor     domain.AmountMinor
+	AdminTelegramID int64
+	Note            *string
+}
+
+// AddAdjustmentParams records a signed correction with an audit note.
+type AddAdjustmentParams struct {
+	UserID          domain.UserID
+	AmountMinor     domain.AmountMinor
+	AdminTelegramID int64
+	Note            string
+}
+
+// ReverseLedgerEntryParams reverses exactly one entry for the same user.
+type ReverseLedgerEntryParams struct {
+	UserID          domain.UserID
+	EntryID         int64
+	AdminTelegramID int64
+	Note            string
+}
+
+// ReverseLedgerEntryRecord is the atomic persistence request for a reversal.
+type ReverseLedgerEntryRecord struct {
+	UserID              domain.UserID
+	EntryID             int64
+	CreatedByTelegramID int64
+	Note                string
+	OccurredAt          time.Time
+	CreatedAt           time.Time
+}
