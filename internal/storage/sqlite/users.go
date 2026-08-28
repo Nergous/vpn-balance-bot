@@ -299,17 +299,21 @@ func wrapUserReadError(operation string, err error) error {
 }
 
 func mapCreateUserError(err error) error {
+	return mapTelegramConstraintError("create user", err)
+}
+
+func mapTelegramConstraintError(operation string, err error) error {
 	var sqliteErr *sqliteDriver.Error
 	if !errors.As(err, &sqliteErr) || sqliteErr.Code() != sqlite3.SQLITE_CONSTRAINT_UNIQUE {
-		return fmt.Errorf("create user: %w", err)
+		return fmt.Errorf("%s: %w", operation, err)
 	}
 
 	switch {
 	case strings.Contains(err.Error(), "users.telegram_user_id"):
-		return fmt.Errorf("create user: %w", account.ErrTelegramUserIDTaken)
+		return fmt.Errorf("%s: %w", operation, account.ErrTelegramUserIDTaken)
 	case strings.Contains(err.Error(), "users.telegram_chat_id"):
-		return fmt.Errorf("create user: %w", account.ErrTelegramChatIDTaken)
+		return fmt.Errorf("%s: %w", operation, account.ErrTelegramChatIDTaken)
 	default:
-		return fmt.Errorf("create user: %w", err)
+		return fmt.Errorf("%s: %w", operation, err)
 	}
 }

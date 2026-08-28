@@ -13,21 +13,25 @@ const supportedCurrency = "RUB"
 
 // Service manages customer billing profiles.
 type Service struct {
-	storage Storage
-	now     func() time.Time
+	storage   Storage
+	inviteTTL time.Duration
+	now       func() time.Time
 }
 
 // New creates an account service backed by storage.
-func New(storage Storage) (*Service, error) {
+func New(storage Storage, inviteTTL time.Duration) (*Service, error) {
 	if storage == nil {
 		return nil, ErrNilStorage
 	}
+	if inviteTTL <= 0 {
+		return nil, ErrInvalidInviteTTL
+	}
 
-	return newService(storage, time.Now), nil
+	return newService(storage, inviteTTL, time.Now), nil
 }
 
-func newService(storage Storage, now func() time.Time) *Service {
-	return &Service{storage: storage, now: now}
+func newService(storage Storage, inviteTTL time.Duration, now func() time.Time) *Service {
+	return &Service{storage: storage, inviteTTL: inviteTTL, now: now}
 }
 
 func (s *Service) CreateUser(ctx context.Context, params CreateUserParams) (domain.User, error) {

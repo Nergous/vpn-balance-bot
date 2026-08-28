@@ -17,4 +17,6 @@ type Storage interface {
 	PauseUser(ctx context.Context, userID domain.UserID, updatedAt time.Time) (domain.User, error)
 	ResumeUser(ctx context.Context, userID domain.UserID, nextChargeOn domain.Date, updatedAt time.Time) (domain.User, error)
 	DisableUser(ctx context.Context, userID domain.UserID, updatedAt time.Time) (domain.User, error)
+	CreateInviteToken(ctx context.Context, record CreateInviteTokenRecord) error
+	ConsumeInviteToken(ctx context.Context, record ConsumeInviteTokenRecord) (domain.User, error)
 }

@@ -1,6 +1,10 @@
 package account
 
-import "github.com/Nergous/vpn-balance-bot/internal/domain"
+import (
+	"time"
+
+	"github.com/Nergous/vpn-balance-bot/internal/domain"
+)
 
 // CreateUserParams contains inputs for a new customer billing profile.
 type CreateUserParams struct {
@@ -29,4 +33,27 @@ type ChangeMonthlyFeeParams struct {
 type ResumeParams struct {
 	UserID       domain.UserID
 	NextChargeOn *domain.Date
+}
+
+// ConsumeInviteParams contains a raw token presented by a Telegram account.
+type ConsumeInviteParams struct {
+	Token          string
+	TelegramUserID int64
+	TelegramChatID int64
+}
+
+// CreateInviteTokenRecord is a hash-only persistence request.
+type CreateInviteTokenRecord struct {
+	TokenHash string
+	UserID    domain.UserID
+	ExpiresAt time.Time
+	CreatedAt time.Time
+}
+
+// ConsumeInviteTokenRecord is a hash-only binding request.
+type ConsumeInviteTokenRecord struct {
+	TokenHash      string
+	TelegramUserID int64
+	TelegramChatID int64
+	ConsumedAt     time.Time
 }

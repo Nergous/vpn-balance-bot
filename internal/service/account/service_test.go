@@ -11,7 +11,7 @@ import (
 )
 
 func TestNewRejectsNilStorage(t *testing.T) {
-	service, err := New(nil)
+	service, err := New(nil, time.Hour)
 	if !errors.Is(err, ErrNilStorage) {
 		t.Fatalf("New(nil) error = %v, want %v", err, ErrNilStorage)
 	}
@@ -37,7 +37,7 @@ func TestCreateUserValidatesParams(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			storage := &fakeStorage{}
-			service := newService(storage, func() time.Time { return time.Time{} })
+			service := newService(storage, time.Hour, func() time.Time { return time.Time{} })
 			_, err := service.CreateUser(context.Background(), test.params)
 			if !errors.Is(err, test.want) {
 				t.Fatalf("CreateUser() error = %v, want %v", err, test.want)
@@ -62,7 +62,7 @@ func TestCreateUserBuildsActiveProfile(t *testing.T) {
 			return user, nil
 		},
 	}
-	service := newService(storage, func() time.Time { return now })
+	service := newService(storage, time.Hour, func() time.Time { return now })
 
 	created, err := service.CreateUser(context.Background(), CreateUserParams{
 		TelegramUserID:   &telegramUserID,
@@ -104,7 +104,7 @@ func TestCreateUserBuildsActiveProfile(t *testing.T) {
 
 func TestListUsersRejectsInvalidStatus(t *testing.T) {
 	storage := &fakeStorage{}
-	service := newService(storage, time.Now)
+	service := newService(storage, time.Hour, time.Now)
 	status := domain.UserStatus("unknown")
 
 	_, err := service.ListUsers(context.Background(), UserFilter{Status: &status})
@@ -165,7 +165,7 @@ func TestServiceForwardsReadAndProfileCommands(t *testing.T) {
 			return storedUser, nil
 		},
 	}
-	service := newService(storage, func() time.Time { return now })
+	service := newService(storage, time.Hour, func() time.Time { return now })
 
 	if _, err := service.UserByID(context.Background(), 1); err != nil {
 		t.Fatal(err)
@@ -192,7 +192,7 @@ func TestServiceForwardsReadAndProfileCommands(t *testing.T) {
 }
 
 func TestServiceRejectsInvalidProfileCommands(t *testing.T) {
-	service := newService(&fakeStorage{}, time.Now)
+	service := newService(&fakeStorage{}, time.Hour, time.Now)
 
 	_, err := service.ChangeMonthlyFee(context.Background(), ChangeMonthlyFeeParams{MonthlyFeeMinor: 0})
 	if !errors.Is(err, ErrInvalidMonthlyFee) {
@@ -217,7 +217,7 @@ func TestServicePropagatesStorageErrors(t *testing.T) {
 			return domain.User{}, ErrNotFound
 		},
 	}
-	service := newService(storage, time.Now)
+	service := newService(storage, time.Hour, time.Now)
 
 	_, err := service.UserByID(context.Background(), 1)
 	if !errors.Is(err, ErrNotFound) {
@@ -226,17 +226,19 @@ func TestServicePropagatesStorageErrors(t *testing.T) {
 }
 
 type fakeStorage struct {
-	createUserCalled bool
-	createdUser      domain.User
-	createUser       func(context.Context, domain.User) (domain.User, error)
-	userByID         func(context.Context, domain.UserID) (domain.User, error)
-	listUsers        func(context.Context, *domain.UserStatus) ([]domain.User, error)
-	userByTelegramID func(context.Context, int64) (domain.User, error)
-	setMonthlyFee    func(context.Context, domain.UserID, domain.AmountMinor, time.Time) (domain.User, error)
-	pauseUser        func(context.Context, domain.UserID, time.Time) (domain.User, error)
-	resumeUser       func(context.Context, domain.UserID, domain.Date, time.Time) (domain.User, error)
-	disableUser      func(context.Context, domain.UserID, time.Time) (domain.User, error)
-	listUsersCalled  bool
+	createUserCalled   bool
+	createdUser        domain.User
+	createUser         func(context.Context, domain.User) (domain.User, error)
+	userByID           func(context.Context, domain.UserID) (domain.User, error)
+	listUsers          func(context.Context, *domain.UserStatus) ([]domain.User, error)
+	userByTelegramID   func(context.Context, int64) (domain.User, error)
+	setMonthlyFee      func(context.Context, domain.UserID, domain.AmountMinor, time.Time) (domain.User, error)
+	pauseUser          func(context.Context, domain.UserID, time.Time) (domain.User, error)
+	resumeUser         func(context.Context, domain.UserID, domain.Date, time.Time) (domain.User, error)
+	disableUser        func(context.Context, domain.UserID, time.Time) (domain.User, error)
+	createInviteToken  func(context.Context, CreateInviteTokenRecord) error
+	consumeInviteToken func(context.Context, ConsumeInviteTokenRecord) (domain.User, error)
+	listUsersCalled    bool
 }
 
 func (f *fakeStorage) CreateUser(ctx context.Context, user domain.User) (domain.User, error) {
@@ -296,6 +298,20 @@ func (f *fakeStorage) DisableUser(ctx context.Context, userID domain.UserID, upd
 		return domain.User{}, errors.New("unexpected DisableUser call")
 	}
 	return f.disableUser(ctx, userID, updatedAt)
+}
+
+func (f *fakeStorage) CreateInviteToken(ctx context.Context, record CreateInviteTokenRecord) error {
+	if f.createInviteToken == nil {
+		return errors.New("unexpected CreateInviteToken call")
+	}
+	return f.createInviteToken(ctx, record)
+}
+
+func (f *fakeStorage) ConsumeInviteToken(ctx context.Context, record ConsumeInviteTokenRecord) (domain.User, error) {
+	if f.consumeInviteToken == nil {
+		return domain.User{}, errors.New("unexpected ConsumeInviteToken call")
+	}
+	return f.consumeInviteToken(ctx, record)
 }
 
 func testDate(t *testing.T, year int, month time.Month, day int) domain.Date {
