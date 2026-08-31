@@ -37,10 +37,11 @@ type Admin struct {
 	adminID   int64
 	wizard    *Wizard
 	reminders AdminReminderService
+	language  string
 }
 
 func NewAdmin(client Client, accounts AdminAccountService, adminID int64, reminders ...AdminReminderService) *Admin {
-	admin := &Admin{client: client, accounts: accounts, adminID: adminID, wizard: NewWizard()}
+	admin := &Admin{client: client, accounts: accounts, adminID: adminID, wizard: NewWizard(), language: LanguageRussian}
 	if len(reminders) > 0 {
 		admin.reminders = reminders[0]
 	}
@@ -48,7 +49,7 @@ func NewAdmin(client Client, accounts AdminAccountService, adminID int64, remind
 }
 func (a *Admin) authorized(userID int64) bool { return userID == a.adminID }
 func (a *Admin) reject(ctx context.Context, chatID int64) error {
-	_, err := a.client.SendText(ctx, chatID, "Действие доступно только администратору.")
+	_, err := a.client.SendText(ctx, chatID, localized(a.language, "admin_denied"))
 	return err
 }
 
@@ -96,7 +97,11 @@ func (a *Admin) Dashboard(ctx context.Context, message IncomingMessage) error {
 			disabled++
 		}
 	}
-	_, err = a.client.SendText(ctx, message.ChatID, fmt.Sprintf("Пользователи: %d\nactive: %d\npaused: %d\ndisabled: %d", len(users), active, paused, disabled))
+	text := fmt.Sprintf("Пользователи: %d\nactive: %d\npaused: %d\ndisabled: %d", len(users), active, paused, disabled)
+	if normalizeLanguage(a.language) == LanguageEnglish {
+		text = fmt.Sprintf("Users: %d\nactive: %d\npaused: %d\ndisabled: %d", len(users), active, paused, disabled)
+	}
+	_, err = a.client.SendText(ctx, message.ChatID, text)
 	return err
 }
 func (a *Admin) Users(ctx context.Context, message IncomingMessage, filter account.UserFilter) error {
@@ -107,7 +112,7 @@ func (a *Admin) Users(ctx context.Context, message IncomingMessage, filter accou
 	if err != nil {
 		return err
 	}
-	text := "Пользователей нет."
+	text := localized(a.language, "users_empty")
 	if len(users) > 0 {
 		text = ""
 		for _, user := range users {
@@ -125,7 +130,11 @@ func (a *Admin) UserCard(ctx context.Context, message IncomingMessage, userID do
 	if err != nil {
 		return err
 	}
-	_, err = a.client.SendText(ctx, message.ChatID, fmt.Sprintf("#%d\n%s\n%s\nТариф: %d %s\nСледующее: %s", user.ID, user.DisplayName, user.Status, user.MonthlyFeeMinor, user.Currency, user.NextChargeOn))
+	text := fmt.Sprintf("#%d\n%s\n%s\nТариф: %d %s\nСледующее: %s", user.ID, user.DisplayName, user.Status, user.MonthlyFeeMinor, user.Currency, user.NextChargeOn)
+	if normalizeLanguage(a.language) == LanguageEnglish {
+		text = fmt.Sprintf("#%d\n%s\n%s\nFee: %d %s\nNext charge: %s", user.ID, user.DisplayName, user.Status, user.MonthlyFeeMinor, user.Currency, user.NextChargeOn)
+	}
+	_, err = a.client.SendText(ctx, message.ChatID, text)
 	return err
 }
 func (a *Admin) CreateUser(ctx context.Context, message IncomingMessage, params account.CreateUserParams) (domain.User, error) {
@@ -139,7 +148,11 @@ func (a *Admin) BeginPayment(ctx context.Context, message IncomingMessage, draft
 		return a.reject(ctx, message.ChatID)
 	}
 	a.wizard.BeginPayment(message.UserID, draft)
-	_, err := a.client.SendText(ctx, message.ChatID, fmt.Sprintf("Подтвердите payment: user #%d, amount %d", draft.UserID, draft.AmountMinor))
+	text := fmt.Sprintf("Подтвердите payment: user #%d, amount %d", draft.UserID, draft.AmountMinor)
+	if normalizeLanguage(a.language) == LanguageEnglish {
+		text = fmt.Sprintf("Confirm payment: user #%d, amount %d", draft.UserID, draft.AmountMinor)
+	}
+	_, err := a.client.SendText(ctx, message.ChatID, text)
 	return err
 }
 func (a *Admin) ConfirmPayment(ctx context.Context, message IncomingMessage) error {
@@ -153,7 +166,7 @@ func (a *Admin) CancelWizard(ctx context.Context, message IncomingMessage) error
 		return a.reject(ctx, message.ChatID)
 	}
 	a.wizard.Cancel(message.UserID)
-	_, err := a.client.SendText(ctx, message.ChatID, "Операция отменена.")
+	_, err := a.client.SendText(ctx, message.ChatID, localized(a.language, "wizard_cancelled"))
 	return err
 }
 func (a *Admin) Pause(ctx context.Context, message IncomingMessage, userID domain.UserID) error {
@@ -214,7 +227,7 @@ func (a *Admin) Reverse(ctx context.Context, message IncomingMessage, params acc
 // /admin payment <user-id> <amount> [note]; /admin confirm; /admin cancel.
 func (b *Bot) HandleAdminCommand(ctx context.Context, message IncomingMessage) error {
 	if b.admin == nil {
-		return b.send(ctx, message.ChatID, "Админ-панель не настроена.")
+		return b.send(ctx, message.ChatID, localized(b.language, "admin_unconfigured"))
 	}
 	if !b.admin.authorized(message.UserID) {
 		return b.admin.reject(ctx, message.ChatID)
@@ -229,43 +242,43 @@ func (b *Bot) HandleAdminCommand(ctx context.Context, message IncomingMessage) e
 		if len(parts) == 3 {
 			status := domain.UserStatus(parts[2])
 			if !status.IsValid() {
-				return b.send(ctx, message.ChatID, "Статус: active, paused или disabled.")
+				return b.send(ctx, message.ChatID, localizedPair(b.language, "Статус: active, paused или disabled.", "Status: active, paused, or disabled."))
 			}
 			filter.Status = &status
 		}
 		return b.admin.Users(ctx, message, filter)
 	case "invite":
-		userID, err := adminUserID(parts, 2)
+		userID, err := adminUserID(b.language, parts, 2)
 		if err != nil {
 			return b.send(ctx, message.ChatID, err.Error())
 		}
 		return b.admin.CreateInvite(ctx, message, userID)
 	case "user":
-		userID, err := adminUserID(parts, 2)
+		userID, err := adminUserID(b.language, parts, 2)
 		if err != nil {
 			return b.send(ctx, message.ChatID, err.Error())
 		}
 		return b.admin.UserCard(ctx, message, userID)
 	case "create":
 		if len(parts) != 6 {
-			return b.send(ctx, message.ChatID, "Используйте: /admin create <name> <fee> <anchor-day> <next-charge YYYY-MM-DD>")
+			return b.send(ctx, message.ChatID, localizedPair(b.language, "Используйте: /admin create <name> <fee> <anchor-day> <next-charge YYYY-MM-DD>", "Use: /admin create <name> <fee> <anchor-day> <next-charge YYYY-MM-DD>"))
 		}
 		fee, err := strconv.ParseInt(parts[3], 10, 64)
 		if err != nil {
-			return b.send(ctx, message.ChatID, "Тариф должен быть целым числом копеек.")
+			return b.send(ctx, message.ChatID, localizedPair(b.language, "Тариф должен быть целым числом копеек.", "Fee must be an integer amount in minor units."))
 		}
 		anchor, err := strconv.Atoi(parts[4])
 		if err != nil {
-			return b.send(ctx, message.ChatID, "Anchor day должен быть числом.")
+			return b.send(ctx, message.ChatID, localizedPair(b.language, "Anchor day должен быть числом.", "Anchor day must be a number."))
 		}
 		next, err := domain.ParseDate(parts[5])
 		if err != nil {
-			return b.send(ctx, message.ChatID, "Неверная дата следующего списания.")
+			return b.send(ctx, message.ChatID, localizedPair(b.language, "Неверная дата следующего списания.", "Invalid next charge date."))
 		}
 		_, err = b.admin.CreateUser(ctx, message, account.CreateUserParams{DisplayName: parts[2], MonthlyFeeMinor: domain.AmountMinor(fee), Currency: "RUB", BillingAnchorDay: anchor, NextChargeOn: next})
 		return err
 	case "pause", "disable":
-		userID, err := adminUserID(parts, 2)
+		userID, err := adminUserID(b.language, parts, 2)
 		if err != nil {
 			return b.send(ctx, message.ChatID, err.Error())
 		}
@@ -274,42 +287,42 @@ func (b *Bot) HandleAdminCommand(ctx context.Context, message IncomingMessage) e
 		}
 		return b.admin.Disable(ctx, message, userID)
 	case "resume":
-		userID, err := adminUserID(parts, 2)
+		userID, err := adminUserID(b.language, parts, 2)
 		if err != nil {
 			return b.send(ctx, message.ChatID, err.Error())
 		}
 		if len(parts) != 4 {
-			return b.send(ctx, message.ChatID, "Используйте: /admin resume <user-id> <YYYY-MM-DD>")
+			return b.send(ctx, message.ChatID, localizedPair(b.language, "Используйте: /admin resume <user-id> <YYYY-MM-DD>", "Use: /admin resume <user-id> <YYYY-MM-DD>"))
 		}
 		next, err := domain.ParseDate(parts[3])
 		if err != nil {
-			return b.send(ctx, message.ChatID, "Неверная дата следующего списания.")
+			return b.send(ctx, message.ChatID, localizedPair(b.language, "Неверная дата следующего списания.", "Invalid next charge date."))
 		}
 		return b.admin.Resume(ctx, message, account.ResumeParams{UserID: userID, NextChargeOn: &next})
 	case "fee":
-		userID, err := adminUserID(parts, 2)
+		userID, err := adminUserID(b.language, parts, 2)
 		if err != nil {
 			return b.send(ctx, message.ChatID, err.Error())
 		}
 		if len(parts) != 4 {
-			return b.send(ctx, message.ChatID, "Используйте: /admin fee <user-id> <amount>")
+			return b.send(ctx, message.ChatID, localizedPair(b.language, "Используйте: /admin fee <user-id> <amount>", "Use: /admin fee <user-id> <amount>"))
 		}
 		fee, err := strconv.ParseInt(parts[3], 10, 64)
 		if err != nil {
-			return b.send(ctx, message.ChatID, "Сумма должна быть целым числом копеек.")
+			return b.send(ctx, message.ChatID, localizedPair(b.language, "Сумма должна быть целым числом копеек.", "Amount must be an integer in minor units."))
 		}
 		return b.admin.ChangeFee(ctx, message, account.ChangeMonthlyFeeParams{UserID: userID, MonthlyFeeMinor: domain.AmountMinor(fee)})
 	case "opening", "adjustment":
-		userID, err := adminUserID(parts, 2)
+		userID, err := adminUserID(b.language, parts, 2)
 		if err != nil {
 			return b.send(ctx, message.ChatID, err.Error())
 		}
 		if len(parts) < 4 {
-			return b.send(ctx, message.ChatID, "Укажите сумму в копейках.")
+			return b.send(ctx, message.ChatID, localizedPair(b.language, "Укажите сумму в копейках.", "Specify the amount in minor units."))
 		}
 		amount, err := strconv.ParseInt(parts[3], 10, 64)
 		if err != nil {
-			return b.send(ctx, message.ChatID, "Сумма должна быть целым числом копеек.")
+			return b.send(ctx, message.ChatID, localizedPair(b.language, "Сумма должна быть целым числом копеек.", "Amount must be an integer in minor units."))
 		}
 		note := strings.TrimSpace(strings.Join(parts[4:], " "))
 		if parts[1] == "opening" {
@@ -321,29 +334,29 @@ func (b *Bot) HandleAdminCommand(ctx context.Context, message IncomingMessage) e
 		}
 		return b.admin.AddAdjustment(ctx, message, account.AddAdjustmentParams{UserID: userID, AmountMinor: domain.AmountMinor(amount), Note: note})
 	case "reverse":
-		userID, err := adminUserID(parts, 2)
+		userID, err := adminUserID(b.language, parts, 2)
 		if err != nil {
 			return b.send(ctx, message.ChatID, err.Error())
 		}
 		if len(parts) < 5 {
-			return b.send(ctx, message.ChatID, "Используйте: /admin reverse <user-id> <entry-id> <comment>")
+			return b.send(ctx, message.ChatID, localizedPair(b.language, "Используйте: /admin reverse <user-id> <entry-id> <comment>", "Use: /admin reverse <user-id> <entry-id> <comment>"))
 		}
 		entryID, err := strconv.ParseInt(parts[3], 10, 64)
 		if err != nil {
-			return b.send(ctx, message.ChatID, "Entry ID должен быть числом.")
+			return b.send(ctx, message.ChatID, localizedPair(b.language, "Entry ID должен быть числом.", "Entry ID must be a number."))
 		}
 		return b.admin.Reverse(ctx, message, account.ReverseLedgerEntryParams{UserID: userID, EntryID: entryID, Note: strings.Join(parts[4:], " ")})
 	case "payment":
 		if len(parts) < 4 {
-			return b.send(ctx, message.ChatID, "Используйте: /admin payment <user-id> <amount> [note]")
+			return b.send(ctx, message.ChatID, localizedPair(b.language, "Используйте: /admin payment <user-id> <amount> [note]", "Use: /admin payment <user-id> <amount> [note]"))
 		}
-		userID, err := adminUserID(parts, 2)
+		userID, err := adminUserID(b.language, parts, 2)
 		if err != nil {
 			return b.send(ctx, message.ChatID, err.Error())
 		}
 		amount, err := strconv.ParseInt(parts[3], 10, 64)
 		if err != nil {
-			return b.send(ctx, message.ChatID, "Сумма должна быть целым числом копеек.")
+			return b.send(ctx, message.ChatID, localizedPair(b.language, "Сумма должна быть целым числом копеек.", "Amount must be an integer in minor units."))
 		}
 		var note *string
 		if value := strings.TrimSpace(strings.Join(parts[4:], " ")); value != "" {
@@ -355,27 +368,27 @@ func (b *Bot) HandleAdminCommand(ctx context.Context, message IncomingMessage) e
 	case "cancel":
 		return b.admin.CancelWizard(ctx, message)
 	case "remind":
-		userID, err := adminUserID(parts, 2)
+		userID, err := adminUserID(b.language, parts, 2)
 		if err != nil {
 			return b.send(ctx, message.ChatID, err.Error())
 		}
 		text := strings.TrimSpace(strings.Join(parts[3:], " "))
 		if text == "" {
-			return b.send(ctx, message.ChatID, "Используйте: /admin remind <user-id> <text>")
+			return b.send(ctx, message.ChatID, localizedPair(b.language, "Используйте: /admin remind <user-id> <text>", "Use: /admin remind <user-id> <text>"))
 		}
 		return b.admin.RemindNow(ctx, message, userID, text)
 	default:
-		return b.send(ctx, message.ChatID, "Команды: /admin, /admin users [status], /admin invite <id>, /admin payment <id> <amount> [note], /admin confirm, /admin cancel")
+		return b.send(ctx, message.ChatID, localizedPair(b.language, "Команды: /admin, /admin users [status], /admin invite <id>, /admin payment <id> <amount> [note], /admin confirm, /admin cancel", "Commands: /admin, /admin users [status], /admin invite <id>, /admin payment <id> <amount> [note], /admin confirm, /admin cancel"))
 	}
 }
 
-func adminUserID(parts []string, index int) (domain.UserID, error) {
+func adminUserID(language string, parts []string, index int) (domain.UserID, error) {
 	if len(parts) <= index {
-		return 0, errors.New("Не указан user ID.")
+		return 0, errors.New(localizedPair(language, "Не указан user ID.", "User ID is missing."))
 	}
 	value, err := strconv.ParseInt(parts[index], 10, 64)
 	if err != nil || value <= 0 {
-		return 0, errors.New("User ID должен быть положительным числом.")
+		return 0, errors.New(localizedPair(language, "User ID должен быть положительным числом.", "User ID must be a positive number."))
 	}
 	return domain.UserID(value), nil
 }

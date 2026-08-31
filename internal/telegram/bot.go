@@ -33,10 +33,11 @@ type Bot struct {
 	poller   poller
 	accounts AccountService
 	admin    *Admin
+	language string
 }
 
-func New(token string, accounts AccountService) (*Bot, error) {
-	adapter := &Bot{accounts: accounts}
+func New(token string, accounts AccountService, language string) (*Bot, error) {
+	adapter := &Bot{accounts: accounts, language: normalizeLanguage(language)}
 	client, err := newProductionBot(token, adapter)
 	if err != nil {
 		return nil, err
@@ -45,8 +46,12 @@ func New(token string, accounts AccountService) (*Bot, error) {
 	return adapter, nil
 }
 
-func NewWithClient(client Client, accounts AccountService) *Bot {
-	return &Bot{client: client, accounts: accounts}
+func NewWithClient(client Client, accounts AccountService, language ...string) *Bot {
+	selected := LanguageRussian
+	if len(language) > 0 {
+		selected = language[0]
+	}
+	return &Bot{client: client, accounts: accounts, language: normalizeLanguage(selected)}
 }
 
 // EnableAdmin binds admin-only handlers to the configured numeric Telegram ID.
@@ -56,6 +61,7 @@ func (b *Bot) EnableAdmin(adminID int64, reminders ...AdminReminderService) erro
 		return errors.New("account service does not support admin operations")
 	}
 	b.admin = NewAdmin(b.client, accounts, adminID, reminders...)
+	b.admin.language = b.language
 	return nil
 }
 func (b *Bot) Start(ctx context.Context) {

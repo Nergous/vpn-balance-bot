@@ -15,19 +15,24 @@ var (
 )
 
 type Service struct {
-	storage Storage
-	sender  Sender
-	now     func() time.Time
+	storage  Storage
+	sender   Sender
+	now      func() time.Time
+	language string
 }
 
-func New(storage Storage, sender Sender) (*Service, error) {
+func New(storage Storage, sender Sender, language ...string) (*Service, error) {
 	if storage == nil {
 		return nil, ErrNilStorage
 	}
 	if sender == nil {
 		return nil, ErrNilSender
 	}
-	return &Service{storage: storage, sender: sender, now: time.Now}, nil
+	selected := "ru"
+	if len(language) > 0 && language[0] == "en" {
+		selected = "en"
+	}
+	return &Service{storage: storage, sender: sender, now: time.Now, language: selected}, nil
 }
 
 // RecoverPending marks deliveries left pending by a prior process as unknown.
@@ -63,7 +68,7 @@ func (s *Service) Process(ctx context.Context, today domain.Date) (int, error) {
 		if !ok {
 			continue
 		}
-		created, err := s.Deliver(ctx, user, user.NextChargeOn, today, reminderType, automaticText(reminderType))
+		created, err := s.Deliver(ctx, user, user.NextChargeOn, today, reminderType, automaticText(s.language, reminderType))
 		if err != nil {
 			processErrors = append(processErrors, fmt.Errorf("deliver %s reminder to user %d: %w", reminderType, user.ID, err))
 			continue
@@ -121,17 +126,33 @@ func (s *Service) Deliver(ctx context.Context, user domain.User, billingDate, sc
 	return true, nil
 }
 
-func automaticText(reminderType domain.ReminderType) string {
+func automaticText(language string, reminderType domain.ReminderType) string {
+	english := language == "en"
 	switch reminderType {
 	case domain.ReminderTypeBeforeCharge:
+		if !english {
+			return "Списание за подписку будет через 3 дня."
+		}
 		return "Your subscription charge is due in 3 days."
 	case domain.ReminderTypeChargeDebt:
+		if !english {
+			return "Подписка списана. Пополните баланс."
+		}
 		return "Your subscription charge was applied. Please top up your balance."
 	case domain.ReminderTypeOverdue3D:
+		if !english {
+			return "Долг сохраняется уже 3 дня. Пополните баланс."
+		}
 		return "Your balance has been overdue for 3 days. Please top up your balance."
 	case domain.ReminderTypeOverdue7D:
+		if !english {
+			return "Долг сохраняется уже 7 дней. Пополните баланс."
+		}
 		return "Your balance has been overdue for 7 days. Please top up your balance."
 	default:
+		if !english {
+			return "Пополните баланс."
+		}
 		return "Please top up your balance."
 	}
 }

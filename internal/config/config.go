@@ -30,6 +30,12 @@ const (
 
 const defaultTimezone = "Europe/Moscow"
 
+const (
+	BotLanguageRussian = "ru"
+	BotLanguageEnglish = "en"
+	defaultBotLanguage = BotLanguageRussian
+)
+
 var (
 	telegramAPIBaseURL = "https://api.telegram.org"
 	telegramHTTPClient = &http.Client{Timeout: 5 * time.Second}
@@ -44,6 +50,7 @@ type Config struct {
 	InviteTTL        time.Duration
 	LogLevel         string
 	AppEnv           string
+	BotLanguage      string
 	HTTPTimeout      time.Duration
 	DBTimeout        time.Duration
 }
@@ -135,6 +142,7 @@ func readConfig(appEnv string) (*Config, error) {
 		InviteTTL:        inviteTTL,
 		LogLevel:         strings.ToUpper(optionalString("LOG_LEVEL", InfoLevel)),
 		AppEnv:           appEnv,
+		BotLanguage:      strings.ToLower(optionalString("BOT_LANG", defaultBotLanguage)),
 		HTTPTimeout:      httpTimeout,
 		DBTimeout:        dbTimeout,
 	}, nil
@@ -163,6 +171,9 @@ func validateConfig(cfg *Config) error {
 	}
 	if !validLogLevel(cfg.LogLevel) {
 		errs = append(errs, fmt.Errorf("%w: %q", ErrInvalidLogLevel, cfg.LogLevel))
+	}
+	if !validBotLanguage(cfg.BotLanguage) {
+		errs = append(errs, ErrInvalidBotLanguage)
 	}
 	if cfg.AppEnv == EnvProduction && isUnsafeProductionDatabasePath(cfg.DatabasePath) {
 		errs = append(errs, ErrUnsafeProductionDatabase)
@@ -287,6 +298,10 @@ func validLogLevel(value string) bool {
 	default:
 		return false
 	}
+}
+
+func validBotLanguage(value string) bool {
+	return value == BotLanguageRussian || value == BotLanguageEnglish
 }
 
 func isUnsafeProductionDatabasePath(path string) bool {

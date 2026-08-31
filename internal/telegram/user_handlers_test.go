@@ -75,6 +75,18 @@ func TestHistoryUsesAtMostTenEntries(t *testing.T) {
 	}
 }
 
+func TestUserMessagesCanBeEnglish(t *testing.T) {
+	client := &testutil.FakeTelegramClient{}
+	service := &fakeAccount{byTelegram: func(context.Context, int64) (domain.User, error) { return domain.User{}, account.ErrNotFound }}
+	bot := NewWithClient(client, service, LanguageEnglish)
+	if err := bot.HandleStatus(context.Background(), IncomingMessage{ChatID: 1, UserID: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.Sent) != 1 || !strings.Contains(client.Sent[0].Text, "Profile is not linked") {
+		t.Fatalf("sent = %#v", client.Sent)
+	}
+}
+
 type fakeAccount struct {
 	consume    func(context.Context, account.ConsumeInviteParams) (domain.User, error)
 	byTelegram func(context.Context, int64) (domain.User, error)

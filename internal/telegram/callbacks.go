@@ -11,6 +11,6 @@ func (b *Bot) HandleCallback(ctx context.Context, callback IncomingCallback) err
 	case "user_help":
 		return b.HandleHelp(ctx, IncomingMessage{ChatID: callback.ChatID, UserID: callback.UserID})
 	default:
-		return b.send(ctx, callback.ChatID, "Неизвестное действие.")
+		return b.send(ctx, callback.ChatID, localized(b.language, "callback_unknown"))
 	}
 }

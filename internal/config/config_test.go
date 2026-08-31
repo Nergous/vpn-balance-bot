@@ -17,7 +17,7 @@ func TestLoadAndMustLoad(t *testing.T) {
 	cfg, err := Load(context.Background())
 	if err != nil || cfg.TelegramBotToken != "test-token" || cfg.AdminTelegramID != 12345 ||
 		cfg.DatabasePath != "./data/test.db" || cfg.AppTimezone != defaultTimezone ||
-		cfg.ReminderHour != 9 || cfg.InviteTTL != 168*time.Hour || cfg.LogLevel != InfoLevel {
+		cfg.ReminderHour != 9 || cfg.InviteTTL != 168*time.Hour || cfg.LogLevel != InfoLevel || cfg.BotLanguage != BotLanguageRussian {
 		t.Fatalf("Load() = %+v, %v", cfg, err)
 	}
 	if MustLoad(context.Background()).AppEnv != EnvTest {
@@ -152,7 +152,7 @@ func TestValidateConfig(t *testing.T) {
 	valid := &Config{
 		TelegramBotToken: "token", AdminTelegramID: 1, DatabasePath: "data/bot.db",
 		AppTimezone: "UTC", ReminderHour: 9, InviteTTL: time.Hour,
-		LogLevel: InfoLevel, AppEnv: EnvTest,
+		LogLevel: InfoLevel, AppEnv: EnvTest, BotLanguage: BotLanguageRussian,
 	}
 	if err := validateConfig(valid); err != nil {
 		t.Fatal(err)
@@ -165,12 +165,14 @@ func TestValidateConfig(t *testing.T) {
 	invalid.ReminderHour = 24
 	invalid.InviteTTL = 0
 	invalid.LogLevel = "trace"
+	invalid.BotLanguage = "de"
 	invalid.AppEnv = EnvProduction
 	err := validateConfig(&invalid)
 	for _, want := range []error{
 		ErrTelegramBotTokenRequired, ErrAdminTelegramIDInvalid,
 		ErrInvalidTimezone, ErrInvalidReminderHour, ErrInvalidInviteTTL,
 		ErrInvalidLogLevel, ErrUnsafeProductionDatabase,
+		ErrInvalidBotLanguage,
 	} {
 		if !errors.Is(err, want) {
 			t.Errorf("missing %v in %v", want, err)
@@ -181,6 +183,19 @@ func TestValidateConfig(t *testing.T) {
 	missingDatabase.DatabasePath = ""
 	if !errors.Is(validateConfig(&missingDatabase), ErrDatabasePathRequired) {
 		t.Error("missing database path was not rejected")
+	}
+}
+
+func TestLoadBotLanguage(t *testing.T) {
+	setBaseEnvironment(t, EnvTest)
+	t.Setenv("BOT_LANG", " EN ")
+	cfg, err := Load(context.Background())
+	if err != nil || cfg.BotLanguage != BotLanguageEnglish {
+		t.Fatalf("Load() language = %q, %v", cfg.BotLanguage, err)
+	}
+	t.Setenv("BOT_LANG", "de")
+	if _, err := Load(context.Background()); !errors.Is(err, ErrInvalidBotLanguage) {
+		t.Fatalf("invalid BOT_LANG error = %v", err)
 	}
 }
 
@@ -306,6 +321,9 @@ func TestHelpers(t *testing.T) {
 			t.Errorf("level %q rejected", level)
 		}
 	}
+	if !validBotLanguage(BotLanguageEnglish) || validBotLanguage("de") {
+		t.Error("bot language validation failed")
+	}
 	if validLogLevel("trace") {
 		t.Error("trace accepted")
 	}
@@ -373,7 +391,7 @@ func clearConfigEnvironment(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
 		"APP_ENV", "TELEGRAM_BOT_TOKEN", "ADMIN_TELEGRAM_ID", "DATABASE_PATH",
-		"APP_TIMEZONE", "REMINDER_HOUR", "INVITE_TTL", "LOG_LEVEL",
+		"APP_TIMEZONE", "REMINDER_HOUR", "INVITE_TTL", "LOG_LEVEL", "BOT_LANG",
 	} {
 		t.Setenv(key, "")
 	}

@@ -14,6 +14,7 @@ var (
 	ErrInvalidReminderHour         = errors.New("reminder hour is invalid")
 	ErrInvalidInviteTTL            = errors.New("invite TTL is invalid")
 	ErrInvalidLogLevel             = errors.New("log level is invalid")
+	ErrInvalidBotLanguage          = errors.New("bot language must be ru or en")
 	ErrUnsafeProductionDatabase    = errors.New("production database path is unsafe")
 
 	ErrTelegramBotTokenRequired = errors.New("telegram bot token is required")

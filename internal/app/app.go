@@ -27,7 +27,7 @@ type schedulerRuntime interface{ Start(context.Context) }
 type App struct {
 	cfg          *config.Config
 	logger       *slog.Logger
-	newTelegram  func(string, telegram.AccountService) (telegramRuntime, error)
+	newTelegram  func(string, telegram.AccountService, string) (telegramRuntime, error)
 	newScheduler func(*billing.Service, *reminder.Service, *time.Location, int) (schedulerRuntime, error)
 }
 
@@ -35,8 +35,8 @@ func New(cfg *config.Config, logger *slog.Logger) *App {
 	return &App{
 		cfg:    cfg,
 		logger: logger,
-		newTelegram: func(token string, accounts telegram.AccountService) (telegramRuntime, error) {
-			return telegram.New(token, accounts)
+		newTelegram: func(token string, accounts telegram.AccountService, language string) (telegramRuntime, error) {
+			return telegram.New(token, accounts, language)
 		},
 		newScheduler: func(billingService *billing.Service, reminderService *reminder.Service, location *time.Location, hour int) (schedulerRuntime, error) {
 			return scheduler.New(billingService, reminderService, location, hour)
@@ -76,11 +76,11 @@ func (a *App) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("create billing service: %w", err)
 	}
-	bot, err := a.newTelegram(a.cfg.TelegramBotToken, accounts)
+	bot, err := a.newTelegram(a.cfg.TelegramBotToken, accounts, a.cfg.BotLanguage)
 	if err != nil {
 		return fmt.Errorf("create Telegram bot: %w", err)
 	}
-	reminderService, err := reminder.New(s, bot)
+	reminderService, err := reminder.New(s, bot, a.cfg.BotLanguage)
 	if err != nil {
 		return fmt.Errorf("create reminder service: %w", err)
 	}

@@ -23,7 +23,7 @@ func TestRunMigratesTemporaryDatabaseAndStopsWorkers(t *testing.T) {
 	application := New(cfg, logger)
 	bot := &fakeTelegram{started: make(chan struct{})}
 	scheduled := &fakeScheduler{started: make(chan struct{})}
-	application.newTelegram = func(string, telegram.AccountService) (telegramRuntime, error) { return bot, nil }
+	application.newTelegram = func(string, telegram.AccountService, string) (telegramRuntime, error) { return bot, nil }
 	application.newScheduler = func(*billing.Service, *reminder.Service, *time.Location, int) (schedulerRuntime, error) {
 		return scheduled, nil
 	}
