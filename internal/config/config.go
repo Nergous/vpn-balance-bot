@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Nergous/vpn-balance-bot/internal/localization"
 	"github.com/joho/godotenv"
 )
 
@@ -31,9 +32,9 @@ const (
 const defaultTimezone = "Europe/Moscow"
 
 const (
-	BotLanguageRussian = "ru"
-	BotLanguageEnglish = "en"
-	defaultBotLanguage = BotLanguageRussian
+	BotLanguageRussian = localization.Russian
+	BotLanguageEnglish = localization.English
+	defaultBotLanguage = localization.Default
 )
 
 var (
@@ -50,7 +51,7 @@ type Config struct {
 	InviteTTL        time.Duration
 	LogLevel         string
 	AppEnv           string
-	BotLanguage      string
+	BotLanguage      localization.Language
 	HTTPTimeout      time.Duration
 	DBTimeout        time.Duration
 }
@@ -132,6 +133,10 @@ func readConfig(appEnv string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	botLanguage, err := localization.Parse(optionalString("BOT_LANG", string(defaultBotLanguage)))
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidBotLanguage, err)
+	}
 
 	return &Config{
 		TelegramBotToken: strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN")),
@@ -142,7 +147,7 @@ func readConfig(appEnv string) (*Config, error) {
 		InviteTTL:        inviteTTL,
 		LogLevel:         strings.ToUpper(optionalString("LOG_LEVEL", InfoLevel)),
 		AppEnv:           appEnv,
-		BotLanguage:      strings.ToLower(optionalString("BOT_LANG", defaultBotLanguage)),
+		BotLanguage:      botLanguage,
 		HTTPTimeout:      httpTimeout,
 		DBTimeout:        dbTimeout,
 	}, nil
@@ -168,6 +173,12 @@ func validateConfig(cfg *Config) error {
 	}
 	if cfg.InviteTTL <= 0 {
 		errs = append(errs, ErrInvalidInviteTTL)
+	}
+	if cfg.HTTPTimeout <= 0 {
+		errs = append(errs, ErrInvalidHTTPTimeout)
+	}
+	if cfg.DBTimeout <= 0 {
+		errs = append(errs, ErrInvalidDBTimeout)
 	}
 	if !validLogLevel(cfg.LogLevel) {
 		errs = append(errs, fmt.Errorf("%w: %q", ErrInvalidLogLevel, cfg.LogLevel))
@@ -300,8 +311,8 @@ func validLogLevel(value string) bool {
 	}
 }
 
-func validBotLanguage(value string) bool {
-	return value == BotLanguageRussian || value == BotLanguageEnglish
+func validBotLanguage(value localization.Language) bool {
+	return value.IsSupported()
 }
 
 func isUnsafeProductionDatabasePath(path string) bool {

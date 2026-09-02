@@ -1,49 +1,52 @@
 # VPN Balance Bot
 
-Telegram bot for tracking VPN balances, payments, monthly charges, and reminders.
+Telegram bot for tracking VPN account balances, payments, monthly charges, invitations, and debt reminders. It is designed for one administrator and pre-created user profiles.
 
-The project is designed for one administrator and users whose profiles are created in advance and who receive one-time Telegram invitation links.
+## Current status
 
-## Features
+The repository contains an active Go implementation: configuration, localization, domain types, services, SQLite storage, Telegram handlers, migrations, and application composition are present. The project is still under implementation and is not yet verified as production-ready.
 
-- users can view their balance, plan, next charge date, and recent operations;
-- administrators can create users and record actual payments;
-- ledger model with payments, charges, adjustments, and `reversal` entries;
-- automatic monthly charges with catch-up after downtime;
-- reminders for insufficient balance and outstanding debt;
-- protection against duplicate charges and reminder deliveries;
-- SQLite without CGO, one process, and Telegram long polling.
+The implementation sequence, acceptance criteria, and planned deployment work are maintained in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md). No `deploy/systemd` unit or complete production deployment runbook exists in the current repository.
 
-## Stack
+## Implemented design
 
-- Go — the latest stable version;
-- [`github.com/go-telegram/bot`](https://github.com/go-telegram/bot);
-- `database/sql`;
-- `modernc.org/sqlite`;
-- `log/slog`;
-- embedded SQL migrations through `go:embed`.
-
-## Status
-
-Requirements and implementation stages are described in [PROJECT_PLAN.md](PROJECT_PLAN.md). Source code and `go.mod` will be added according to the plan.
+- Go version is declared in `go.mod`; CI reads that file instead of following a floating release.
+- Telegram long polling through `github.com/go-telegram/bot`.
+- SQLite through `database/sql` and `modernc.org/sqlite`, without CGO.
+- Integer kopeks (`int64`) for money; no floating-point financial calculations.
+- UTC timestamps and calendar calculations in `APP_TIMEZONE`.
+- Immutable ledger entries with reversals instead of editing financial history.
+- Embedded localization catalogs with Russian as the explicit default and English as a supported alternative.
 
 ## Configuration
 
-Copy `.env.example` to `.env` and fill in the values. Never commit `.env` to git.
+For local development, copy `.env.example` to `.env` and replace placeholder secrets. Never commit `.env`. Production must provide variables through the process environment because the application refuses to load a local `.env` when `APP_ENV=production`.
 
-Main variables:
-
-| Variable | Required | Purpose |
-|---|---:|---|
-| `TELEGRAM_BOT_TOKEN` | yes | bot token from BotFather |
-| `ADMIN_TELEGRAM_ID` | yes | administrator's numeric Telegram ID |
-| `DATABASE_PATH` | yes | path to the SQLite database |
-| `APP_TIMEZONE` | no | timezone, defaults to `Europe/Moscow` |
-| `REMINDER_HOUR` | no | reminder hour, defaults to `9` |
-| `INVITE_TTL` | no | invite token lifetime, defaults to `168h` |
-| `LOG_LEVEL` | no | log level, defaults to `info` |
+| Variable | Required | Default | Contract |
+|---|---:|---|---|
+| `APP_ENV` | no | `development` | `development`, `test`, or `production` |
+| `TELEGRAM_BOT_TOKEN` | yes | none | Bot token from BotFather |
+| `ADMIN_TELEGRAM_ID` | yes | none | Positive numeric Telegram ID of the only administrator |
+| `DATABASE_PATH` | yes | none | SQLite database path; production rejects memory, temp, and test-like paths |
+| `APP_TIMEZONE` | no | `Europe/Moscow` | Valid IANA timezone |
+| `REMINDER_HOUR` | no | `9` | Integer from `0` through `23` |
+| `INVITE_TTL` | no | `168h` | Positive Go duration |
+| `LOG_LEVEL` | no | `INFO` | `DEBUG`, `INFO`, `WARN`, or `ERROR`; input is case-insensitive |
+| `BOT_LANG` | no | `ru` | Russian (`ru`) by default; English (`en`) is supported |
+| `HTTP_TIMEOUT` | no | `30s` | Positive Go duration for outbound HTTP operations |
+| `DB_TIMEOUT` | no | `30s` | Positive Go duration for database operations |
 
 ## Checks
+
+Focused checks for configuration and localization:
+
+```bash
+go test ./internal/config ./internal/localization
+go mod tidy -diff
+gofmt -l .
+```
+
+Broader repository checks:
 
 ```bash
 go vet ./...
@@ -53,34 +56,36 @@ go build ./cmd/vpn-balance-bot
 
 Linux CI also runs `go test -race ./...`.
 
-Tests use only SQLite in `t.TempDir()` and a fake Telegram client. Tests never use the production `.env`, production database, or the real Telegram API.
+## Test isolation
 
-## Project structure
+Tests must use temporary SQLite databases created under `t.TempDir()` or in-memory fakes where appropriate. Telegram behavior is exercised through fake clients or local HTTP transports. Tests must not read production `.env`, open the live SQLite database, or contact the real Telegram API or other external services.
+
+The focused configuration and localization tests do not open any database or contact Telegram.
+
+## Repository structure
 
 ```text
-cmd/vpn-balance-bot/main.go
-internal/app/
-internal/config/
-internal/domain/
-internal/service/account/
-internal/service/reminder/
-internal/storage/sqlite/
-internal/telegram/
-internal/testutil/
-migrations/
-deploy/systemd/
+cmd/vpn-balance-bot/       application entry point
+internal/app/              composition and lifecycle
+internal/config/           environment loading and validation
+internal/domain/           business types and rules
+internal/localization/     embedded Russian and English catalogs
+internal/service/          account, billing, reminder, and scheduler use cases
+internal/storage/sqlite/   SQLite implementation and backup logic
+internal/telegram/         Telegram adapter and handlers
+internal/testutil/         test fakes and helpers
+migrations/                embedded SQL migrations
 ```
 
-## Data and production
+## Production limitations
 
-Money values are stored as integer kopeks (`int64`), timestamps use UTC, and billing dates use `APP_TIMEZONE`.
+- No systemd unit, container image, packaging workflow, or automated deployment is currently provided.
+- Real Telegram credentials and network calls are intentionally excluded from automated tests.
+- Production startup, backup/restore, permissions, monitoring, restart behavior, and rollback still require the acceptance work described in `IMPLEMENTATION_PLAN.md`.
+- SQLite WAL databases require a consistent SQLite backup procedure; copying only the main database file is not a safe backup strategy.
 
-The live SQLite database uses WAL. Do not copy only the main database file with a regular file command; use a consistent SQLite backup procedure. Before a production update, create a backup and verify the restore against a separate test database.
-
-The target deployment is a Linux VPS with systemd: the binary in `/opt/vpn-balance-bot/`, data in `/var/lib/vpn-balance-bot/`, and secrets in `/etc/vpn-balance-bot.env` with permissions `0600`.
-
-Detailed requirements are documented in [PROJECT_PLAN.md](PROJECT_PLAN.md).
+Do not treat a green unit-test run as production approval. Complete the remaining plan stages in an isolated test environment before deploying with real credentials or data.
 
 ## License
 
-This project is released under the [MIT](LICENSE) license.
+Released under the [MIT License](LICENSE).

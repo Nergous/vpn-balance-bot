@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Nergous/vpn-balance-bot/internal/config"
+	"github.com/Nergous/vpn-balance-bot/internal/localization"
 	"github.com/Nergous/vpn-balance-bot/internal/service/account"
 	"github.com/Nergous/vpn-balance-bot/internal/service/billing"
 	"github.com/Nergous/vpn-balance-bot/internal/service/reminder"
@@ -19,7 +20,7 @@ import (
 type telegramRuntime interface {
 	reminder.Sender
 	Start(context.Context)
-	EnableAdmin(int64, ...telegram.AdminReminderService) error
+	EnableAdmin(int64, telegram.AdminReminderService) error
 }
 
 type schedulerRuntime interface{ Start(context.Context) }
@@ -27,19 +28,19 @@ type schedulerRuntime interface{ Start(context.Context) }
 type App struct {
 	cfg          *config.Config
 	logger       *slog.Logger
-	newTelegram  func(string, telegram.AccountService, string) (telegramRuntime, error)
-	newScheduler func(*billing.Service, *reminder.Service, *time.Location, int) (schedulerRuntime, error)
+	newTelegram  func(string, telegram.AccountService, localization.Language, time.Duration, *slog.Logger) (telegramRuntime, error)
+	newScheduler func(*billing.Service, *reminder.Service, *time.Location, int, scheduler.Observer) (schedulerRuntime, error)
 }
 
 func New(cfg *config.Config, logger *slog.Logger) *App {
 	return &App{
 		cfg:    cfg,
 		logger: logger,
-		newTelegram: func(token string, accounts telegram.AccountService, language string) (telegramRuntime, error) {
-			return telegram.New(token, accounts, language)
+		newTelegram: func(token string, accounts telegram.AccountService, language localization.Language, timeout time.Duration, logger *slog.Logger) (telegramRuntime, error) {
+			return telegram.New(token, accounts, language, timeout, logger)
 		},
-		newScheduler: func(billingService *billing.Service, reminderService *reminder.Service, location *time.Location, hour int) (schedulerRuntime, error) {
-			return scheduler.New(billingService, reminderService, location, hour)
+		newScheduler: func(billingService *billing.Service, reminderService *reminder.Service, location *time.Location, hour int, observer scheduler.Observer) (schedulerRuntime, error) {
+			return scheduler.New(billingService, reminderService, location, hour, scheduler.WithObserver(observer))
 		},
 	}
 }
@@ -76,7 +77,7 @@ func (a *App) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("create billing service: %w", err)
 	}
-	bot, err := a.newTelegram(a.cfg.TelegramBotToken, accounts, a.cfg.BotLanguage)
+	bot, err := a.newTelegram(a.cfg.TelegramBotToken, accounts, a.cfg.BotLanguage, a.cfg.HTTPTimeout, a.logger)
 	if err != nil {
 		return fmt.Errorf("create Telegram bot: %w", err)
 	}
@@ -87,7 +88,7 @@ func (a *App) Run(ctx context.Context) error {
 	if err := bot.EnableAdmin(a.cfg.AdminTelegramID, reminderService); err != nil {
 		return fmt.Errorf("enable Telegram admin handlers: %w", err)
 	}
-	scheduled, err := a.newScheduler(billingService, reminderService, location, a.cfg.ReminderHour)
+	scheduled, err := a.newScheduler(billingService, reminderService, location, a.cfg.ReminderHour, a.schedulerObserver())
 	if err != nil {
 		return fmt.Errorf("create scheduler: %w", err)
 	}
@@ -109,4 +110,26 @@ func (a *App) Run(ctx context.Context) error {
 	a.logger.Info("application stopped", slog.String("reason", ctx.Err().Error()))
 
 	return nil
+}
+
+func (a *App) schedulerObserver() scheduler.Observer {
+	return func(result scheduler.Result) {
+		attributes := []any{
+			slog.String("date", result.Date.String()),
+			slog.Int("charges", result.Charges),
+			slog.Int("reminders", result.Reminders),
+			slog.Bool("skipped", result.Skipped),
+		}
+		if result.BillingErr != nil {
+			attributes = append(attributes, slog.String("billing_error_type", fmt.Sprintf("%T", result.BillingErr)))
+		}
+		if result.ReminderErr != nil {
+			attributes = append(attributes, slog.String("reminder_error_type", fmt.Sprintf("%T", result.ReminderErr)))
+		}
+		if result.BillingErr != nil || result.ReminderErr != nil {
+			a.logger.Error("scheduler run failed", attributes...)
+			return
+		}
+		a.logger.Info("scheduler run completed", attributes...)
+	}
 }

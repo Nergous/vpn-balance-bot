@@ -2,6 +2,7 @@ package account
 
 import (
 	"context"
+	"math"
 	"strings"
 
 	"github.com/Nergous/vpn-balance-bot/internal/domain"
@@ -23,6 +24,7 @@ func (s *Service) AddPayment(ctx context.Context, params AddPaymentParams) (doma
 	if params.AmountMinor <= 0 {
 		return domain.LedgerEntry{}, ErrInvalidPaymentAmount
 	}
+
 	if params.AdminTelegramID <= 0 {
 		return domain.LedgerEntry{}, ErrInvalidAdminTelegramID
 	}
@@ -35,6 +37,7 @@ func (s *Service) AddAdjustment(ctx context.Context, params AddAdjustmentParams)
 	if err := validateManualLedgerParams(params.AmountMinor, params.AdminTelegramID); err != nil {
 		return domain.LedgerEntry{}, err
 	}
+
 	note := strings.TrimSpace(params.Note)
 	if note == "" {
 		return domain.LedgerEntry{}, ErrAdjustmentNoteRequired
@@ -48,6 +51,7 @@ func (s *Service) ReverseLedgerEntry(ctx context.Context, params ReverseLedgerEn
 	if params.AdminTelegramID <= 0 {
 		return domain.LedgerEntry{}, ErrInvalidAdminTelegramID
 	}
+
 	note := strings.TrimSpace(params.Note)
 	if note == "" {
 		return domain.LedgerEntry{}, ErrReversalNoteRequired
@@ -55,9 +59,12 @@ func (s *Service) ReverseLedgerEntry(ctx context.Context, params ReverseLedgerEn
 
 	now := s.nowUTC()
 	return s.storage.ReverseLedgerEntry(ctx, ReverseLedgerEntryRecord{
-		UserID: params.UserID, EntryID: params.EntryID,
-		CreatedByTelegramID: params.AdminTelegramID, Note: note,
-		OccurredAt: now, CreatedAt: now,
+		UserID:              params.UserID,
+		EntryID:             params.EntryID,
+		CreatedByTelegramID: params.AdminTelegramID,
+		Note:                note,
+		OccurredAt:          now,
+		CreatedAt:           now,
 	})
 }
 
@@ -71,12 +78,22 @@ func (s *Service) LastLedgerEntries(ctx context.Context, userID domain.UserID) (
 	return s.storage.LastLedgerEntries(ctx, userID, lastLedgerEntriesLimit)
 }
 
+// LastUnreversedPayment returns the newest payment that has no reversal.
+func (s *Service) LastUnreversedPayment(ctx context.Context, userID domain.UserID) (domain.LedgerEntry, bool, error) {
+	return s.storage.LastUnreversedPayment(ctx, userID)
+}
+
 func (s *Service) createManualLedgerEntry(ctx context.Context, userID domain.UserID, kind domain.LedgerKind, amount domain.AmountMinor, adminTelegramID int64, note *string) (domain.LedgerEntry, error) {
 	now := s.nowUTC()
 	adminID := adminTelegramID
 	return s.storage.CreateLedgerEntry(ctx, domain.LedgerEntry{
-		UserID: userID, Kind: kind, AmountMinor: amount,
-		OccurredAt: now, CreatedByTelegramID: &adminID, Note: note, CreatedAt: now,
+		UserID:              userID,
+		Kind:                kind,
+		AmountMinor:         amount,
+		OccurredAt:          now,
+		CreatedByTelegramID: &adminID,
+		Note:                note,
+		CreatedAt:           now,
 	})
 }
 
@@ -84,8 +101,13 @@ func validateManualLedgerParams(amount domain.AmountMinor, adminTelegramID int64
 	if amount == 0 {
 		return ErrInvalidLedgerAmount
 	}
+	if amount.Int64() == math.MinInt64 {
+		return domain.ErrAmountOverflow
+	}
+
 	if adminTelegramID <= 0 {
 		return ErrInvalidAdminTelegramID
 	}
+
 	return nil
 }

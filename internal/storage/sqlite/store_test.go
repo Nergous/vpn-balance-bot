@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -45,6 +46,21 @@ func TestNewConfiguresSQLiteConnection(t *testing.T) {
 	}
 	if busyTimeout != 5_000 {
 		t.Fatalf("busy_timeout = %d, want 5000", busyTimeout)
+	}
+
+	if runtime.GOOS != "windows" {
+		var sequence int
+		var name, path string
+		if err := store.db.QueryRowContext(ctx, "PRAGMA database_list").Scan(&sequence, &name, &path); err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Fatalf("database permissions = %04o, want 0600", got)
+		}
 	}
 }
 

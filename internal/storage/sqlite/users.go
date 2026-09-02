@@ -45,6 +45,7 @@ const createUserQuery = `
 	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 
+// CreateUser persists a new billing profile and returns its generated ID.
 func (s *Store) CreateUser(ctx context.Context, user domain.User) (domain.User, error) {
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
@@ -80,24 +81,28 @@ func (s *Store) CreateUser(ctx context.Context, user domain.User) (domain.User, 
 	return user, nil
 }
 
+const selectUserByIDQuery = `SELECT ` + userColumns + ` FROM users WHERE id = ?`
+
+// UserByID returns one profile by its internal identifier.
 func (s *Store) UserByID(ctx context.Context, userID domain.UserID) (domain.User, error) {
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
-	query := `SELECT ` + userColumns + ` FROM users WHERE id = ?`
-	user, err := scanUser(s.db.QueryRowContext(ctx, query, userID))
+	user, err := scanUser(s.db.QueryRowContext(ctx, selectUserByIDQuery, userID))
 	if err != nil {
-		return domain.User{}, wrapUserReadError("get user by ID", err)
+		return domain.User{}, wrapUserReadError("UserByID", err)
 	}
 
 	return user, nil
 }
 
+// ListUsers returns profiles, optionally restricted to one status.
 func (s *Store) ListUsers(ctx context.Context, status *domain.UserStatus) ([]domain.User, error) {
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
 	query := `SELECT ` + userColumns + ` FROM users`
+
 	var args []any
 	if status != nil {
 		query += ` WHERE status = ?`
@@ -127,49 +132,109 @@ func (s *Store) ListUsers(ctx context.Context, status *domain.UserStatus) ([]dom
 	return users, nil
 }
 
+// ListUsersPage returns a bounded page and whether another page exists.
+func (s *Store) ListUsersPage(ctx context.Context, status *domain.UserStatus, afterID domain.UserID, limit int) ([]domain.User, bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+
+	query := `SELECT ` + userColumns + ` FROM users WHERE id > ?`
+	args := []any{afterID}
+	if status != nil {
+		query += ` AND status = ?`
+		args = append(args, *status)
+	}
+	query += ` ORDER BY id ASC LIMIT ?`
+	args = append(args, limit+1)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, false, fmt.Errorf("list user page: %w", err)
+	}
+	defer rows.Close()
+
+	users := make([]domain.User, 0, limit+1)
+	for rows.Next() {
+		user, err := scanUser(rows)
+		if err != nil {
+			return nil, false, fmt.Errorf("scan user page: %w", err)
+		}
+		users = append(users, user)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, fmt.Errorf("iterate user page: %w", err)
+	}
+
+	hasMore := len(users) > limit
+	if hasMore {
+		users = users[:limit]
+	}
+	return users, hasMore, nil
+}
+
+// UserStatusCounts returns aggregate profile counts for the admin dashboard.
+func (s *Store) UserStatusCounts(ctx context.Context) (account.UserStatusCounts, error) {
+	ctx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+
+	var counts account.UserStatusCounts
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*),
+		       COALESCE(SUM(status = 'active'), 0),
+		       COALESCE(SUM(status = 'paused'), 0),
+		       COALESCE(SUM(status = 'disabled'), 0)
+		FROM users
+	`).Scan(&counts.Total, &counts.Active, &counts.Paused, &counts.Disabled)
+	if err != nil {
+		return account.UserStatusCounts{}, fmt.Errorf("count users by status: %w", err)
+	}
+	return counts, nil
+}
+
+const selectUserByTelegramIDQuery = `SELECT ` + userColumns + ` FROM users WHERE telegram_user_id = ?`
+
+// UserByTelegramID resolves a profile using its numeric Telegram user ID.
 func (s *Store) UserByTelegramID(ctx context.Context, telegramID int64) (domain.User, error) {
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
-	query := `SELECT ` + userColumns + ` FROM users WHERE telegram_user_id = ?`
-	user, err := scanUser(s.db.QueryRowContext(ctx, query, telegramID))
+	user, err := scanUser(s.db.QueryRowContext(ctx, selectUserByTelegramIDQuery, telegramID))
 	if err != nil {
-		return domain.User{}, wrapUserReadError("get user by Telegram ID", err)
+		return domain.User{}, wrapUserReadError("UserByTelegramID", err)
 	}
 
 	return user, nil
 }
 
+const updateMonthlyFeeQuery = `UPDATE users SET monthly_fee_minor = ?, updated_at = ? WHERE id = ? RETURNING ` + userColumns
+
+// SetMonthlyFee changes only the fee used by future subscription charges.
 func (s *Store) SetMonthlyFee(
 	ctx context.Context,
 	userID domain.UserID,
 	fee domain.AmountMinor,
 	updatedAt time.Time,
 ) (domain.User, error) {
-	query := `
-		UPDATE users
-		SET monthly_fee_minor = ?, updated_at = ?
-		WHERE id = ?
-		RETURNING ` + userColumns
 
 	return s.updateUser(
 		ctx,
-		"set user monthly fee",
-		query,
+		"SetMonthlyFee",
+		updateMonthlyFeeQuery,
 		fee.Int64(),
 		updatedAt.UTC().Unix(),
 		userID,
 	)
 }
 
+// PauseUser stops future automatic billing without changing ledger history.
 func (s *Store) PauseUser(
 	ctx context.Context,
 	userID domain.UserID,
 	updatedAt time.Time,
 ) (domain.User, error) {
-	return s.setUserStatus(ctx, userID, domain.UserStatusPaused, nil, updatedAt)
+	return s.setUserStatus(ctx, userID, domain.UserStatusPaused, nil, updatedAt, domain.UserStatusActive)
 }
 
+// ResumeUser activates a profile with an explicitly chosen next charge date.
 func (s *Store) ResumeUser(
 	ctx context.Context,
 	userID domain.UserID,
@@ -180,15 +245,24 @@ func (s *Store) ResumeUser(
 		return domain.User{}, domain.ErrInvalidDate
 	}
 
-	return s.setUserStatus(ctx, userID, domain.UserStatusActive, &nextChargeOn, updatedAt)
+	return s.setUserStatus(ctx, userID, domain.UserStatusActive, &nextChargeOn, updatedAt, domain.UserStatusPaused)
 }
 
+// DisableUser permanently excludes a profile from automatic billing and reminders.
 func (s *Store) DisableUser(
 	ctx context.Context,
 	userID domain.UserID,
 	updatedAt time.Time,
 ) (domain.User, error) {
-	return s.setUserStatus(ctx, userID, domain.UserStatusDisabled, nil, updatedAt)
+	return s.setUserStatus(
+		ctx,
+		userID,
+		domain.UserStatusDisabled,
+		nil,
+		updatedAt,
+		domain.UserStatusActive,
+		domain.UserStatusPaused,
+	)
 }
 
 func (s *Store) setUserStatus(
@@ -197,6 +271,7 @@ func (s *Store) setUserStatus(
 	status domain.UserStatus,
 	nextChargeOn *domain.Date,
 	updatedAt time.Time,
+	fromStatuses ...domain.UserStatus,
 ) (domain.User, error) {
 	query := `UPDATE users SET status = ?, updated_at = ?`
 	args := []any{status, updatedAt.UTC().Unix()}
@@ -206,10 +281,34 @@ func (s *Store) setUserStatus(
 		args = append(args, nextChargeOn.String())
 	}
 
-	query += ` WHERE id = ? RETURNING ` + userColumns
+	query += ` WHERE id = ? AND status IN (`
 	args = append(args, userID)
+	placeholders := make([]string, len(fromStatuses))
+	for index, fromStatus := range fromStatuses {
+		placeholders[index] = "?"
+		args = append(args, fromStatus)
+	}
+	query += strings.Join(placeholders, ", ") + `) RETURNING ` + userColumns
 
-	return s.updateUser(ctx, "set user status", query, args...)
+	ctx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+
+	user, err := scanUser(s.db.QueryRowContext(ctx, query, args...))
+	if errors.Is(err, sql.ErrNoRows) {
+		var exists bool
+		if existsErr := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE id = ?)`, userID).Scan(&exists); existsErr != nil {
+			return domain.User{}, fmt.Errorf("check user status transition: %w", existsErr)
+		}
+		if !exists {
+			return domain.User{}, account.ErrNotFound
+		}
+		return domain.User{}, account.ErrInvalidUserStatusTransition
+	}
+	if err != nil {
+		return domain.User{}, fmt.Errorf("set user status: %w", err)
+	}
+
+	return user, nil
 }
 
 func (s *Store) updateUser(
@@ -299,7 +398,7 @@ func wrapUserReadError(operation string, err error) error {
 }
 
 func mapCreateUserError(err error) error {
-	return mapTelegramConstraintError("create user", err)
+	return mapTelegramConstraintError("CreateUser", err)
 }
 
 func mapTelegramConstraintError(operation string, err error) error {

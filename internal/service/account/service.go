@@ -23,6 +23,7 @@ func New(storage Storage, inviteTTL time.Duration) (*Service, error) {
 	if storage == nil {
 		return nil, ErrNilStorage
 	}
+
 	if inviteTTL <= 0 {
 		return nil, ErrInvalidInviteTTL
 	}
@@ -31,16 +32,23 @@ func New(storage Storage, inviteTTL time.Duration) (*Service, error) {
 }
 
 func newService(storage Storage, inviteTTL time.Duration, now func() time.Time) *Service {
-	return &Service{storage: storage, inviteTTL: inviteTTL, now: now}
+	return &Service{
+		storage:   storage,
+		inviteTTL: inviteTTL,
+		now:       now,
+	}
 }
 
+// CreateUser validates and creates an active customer billing profile.
 func (s *Service) CreateUser(ctx context.Context, params CreateUserParams) (domain.User, error) {
 	displayName, err := validateCreateUserParams(params)
+
 	if err != nil {
 		return domain.User{}, err
 	}
 
 	now := s.now().UTC().Truncate(time.Second)
+
 	return s.storage.CreateUser(ctx, domain.User{
 		TelegramUserID:   params.TelegramUserID,
 		TelegramChatID:   params.TelegramChatID,
@@ -56,14 +64,17 @@ func (s *Service) CreateUser(ctx context.Context, params CreateUserParams) (doma
 	})
 }
 
+// UserByID returns a customer billing profile by its internal identifier.
 func (s *Service) UserByID(ctx context.Context, userID domain.UserID) (domain.User, error) {
 	return s.storage.UserByID(ctx, userID)
 }
 
+// UserByTelegramID returns a customer billing profile linked to a Telegram user.
 func (s *Service) UserByTelegramID(ctx context.Context, telegramID int64) (domain.User, error) {
 	return s.storage.UserByTelegramID(ctx, telegramID)
 }
 
+// ListUsers returns customer profiles matching filter.
 func (s *Service) ListUsers(ctx context.Context, filter UserFilter) ([]domain.User, error) {
 	if filter.Status != nil && !filter.Status.IsValid() {
 		return nil, ErrInvalidUserStatus
@@ -72,6 +83,67 @@ func (s *Service) ListUsers(ctx context.Context, filter UserFilter) ([]domain.Us
 	return s.storage.ListUsers(ctx, filter.Status)
 }
 
+type userPageStorage interface {
+	ListUsersPage(context.Context, *domain.UserStatus, domain.UserID, int) ([]domain.User, bool, error)
+}
+
+// ListUsersPage returns a bounded page ordered by user ID.
+func (s *Service) ListUsersPage(ctx context.Context, filter UserFilter, afterID domain.UserID, limit int) ([]domain.User, bool, error) {
+	if filter.Status != nil && !filter.Status.IsValid() {
+		return nil, false, ErrInvalidUserStatus
+	}
+	if limit <= 0 {
+		return nil, false, ErrInvalidUserPageLimit
+	}
+	if storage, ok := s.storage.(userPageStorage); ok {
+		return storage.ListUsersPage(ctx, filter.Status, afterID, limit)
+	}
+
+	users, err := s.storage.ListUsers(ctx, filter.Status)
+	if err != nil {
+		return nil, false, err
+	}
+	page := make([]domain.User, 0, limit)
+	for _, user := range users {
+		if user.ID <= afterID {
+			continue
+		}
+		if len(page) == limit {
+			return page, true, nil
+		}
+		page = append(page, user)
+	}
+	return page, false, nil
+}
+
+type userStatusCountStorage interface {
+	UserStatusCounts(context.Context) (UserStatusCounts, error)
+}
+
+// UserStatusCounts returns aggregate profile counts without materializing users.
+func (s *Service) UserStatusCounts(ctx context.Context) (UserStatusCounts, error) {
+	if storage, ok := s.storage.(userStatusCountStorage); ok {
+		return storage.UserStatusCounts(ctx)
+	}
+	users, err := s.storage.ListUsers(ctx, nil)
+	if err != nil {
+		return UserStatusCounts{}, err
+	}
+	counts := UserStatusCounts{Total: len(users)}
+	for _, user := range users {
+		switch user.Status {
+		case domain.UserStatusActive:
+			counts.Active++
+		case domain.UserStatusPaused:
+			counts.Paused++
+		case domain.UserStatusDisabled:
+			counts.Disabled++
+		}
+	}
+	return counts, nil
+}
+
+// ChangeMonthlyFee updates a customer's recurring monthly charge.
 func (s *Service) ChangeMonthlyFee(ctx context.Context, params ChangeMonthlyFeeParams) (domain.User, error) {
 	if params.MonthlyFeeMinor <= 0 {
 		return domain.User{}, ErrInvalidMonthlyFee
@@ -80,10 +152,12 @@ func (s *Service) ChangeMonthlyFee(ctx context.Context, params ChangeMonthlyFeeP
 	return s.storage.SetMonthlyFee(ctx, params.UserID, params.MonthlyFeeMinor, s.nowUTC())
 }
 
+// Pause suspends automatic billing for a customer profile.
 func (s *Service) Pause(ctx context.Context, userID domain.UserID) (domain.User, error) {
 	return s.storage.PauseUser(ctx, userID, s.nowUTC())
 }
 
+// Resume reactivates a profile from the supplied next billing date.
 func (s *Service) Resume(ctx context.Context, params ResumeParams) (domain.User, error) {
 	if params.NextChargeOn == nil {
 		return domain.User{}, ErrResumeDateRequired
@@ -95,6 +169,7 @@ func (s *Service) Resume(ctx context.Context, params ResumeParams) (domain.User,
 	return s.storage.ResumeUser(ctx, params.UserID, *params.NextChargeOn, s.nowUTC())
 }
 
+// Disable permanently removes a customer profile from active billing.
 func (s *Service) Disable(ctx context.Context, userID domain.UserID) (domain.User, error) {
 	return s.storage.DisableUser(ctx, userID, s.nowUTC())
 }
@@ -108,15 +183,19 @@ func validateCreateUserParams(params CreateUserParams) (string, error) {
 	if displayName == "" {
 		return "", ErrInvalidDisplayName
 	}
+
 	if params.MonthlyFeeMinor <= 0 {
 		return "", ErrInvalidMonthlyFee
 	}
+
 	if params.Currency != supportedCurrency {
 		return "", fmt.Errorf("%w: %s", ErrUnsupportedCurrency, params.Currency)
 	}
+
 	if params.BillingAnchorDay < 1 || params.BillingAnchorDay > 31 {
 		return "", ErrInvalidAnchorDay
 	}
+
 	if !params.NextChargeOn.IsValid() {
 		return "", ErrInvalidNextChargeOn
 	}

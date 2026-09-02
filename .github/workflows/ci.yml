@@ -14,19 +14,16 @@ concurrency:
 
 jobs:
   verify:
-    # The repository currently contains documentation only. Start CI as soon
-    # as the Go module is added, without failing the initial scaffold.
-    if: ${{ hashFiles('go.mod') != '' }}
     runs-on: ubuntu-latest
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@db41740e12847bb616a339b75eb9414e711417df # v7.0.1
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@403833af8e5981a13ba72a4e90025743050557ca # v7.0.0
         with:
-          go-version: stable
+          go-version-file: go.mod
           cache: true
 
       - name: Check formatting

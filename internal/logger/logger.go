@@ -1,3 +1,4 @@
+// Package logger configures structured application logging.
 package logger
 
 import (
@@ -7,6 +8,9 @@ import (
 	"github.com/Nergous/vpn-balance-bot/internal/config"
 )
 
+// New creates a logger using the configured level and environment.
+// Production emits JSON; development and test environments emit readable text.
+// Source locations are included only in development logs.
 func New(cfg *config.Config, output io.Writer) (*slog.Logger, error) {
 	var level slog.Level
 
@@ -20,6 +24,7 @@ func New(cfg *config.Config, output io.Writer) (*slog.Logger, error) {
 	}
 
 	var handler slog.Handler
+
 	if cfg.AppEnv == config.EnvProduction {
 		handler = slog.NewJSONHandler(output, options)
 	} else {

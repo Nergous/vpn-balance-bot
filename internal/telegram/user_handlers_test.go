@@ -15,8 +15,8 @@ import (
 func TestUserHandlersDoNotExposeUnlinkedProfiles(t *testing.T) {
 	client := &testutil.FakeTelegramClient{}
 	service := &fakeAccount{byTelegram: func(context.Context, int64) (domain.User, error) { return domain.User{}, account.ErrNotFound }}
-	bot := NewWithClient(client, service)
-	if err := bot.HandleStatus(context.Background(), IncomingMessage{ChatID: 1, UserID: 999, Username: "spoofed"}); err != nil {
+	bot := NewWithClient(client, service, LanguageRussian)
+	if err := bot.HandleStatus(context.Background(), IncomingMessage{ChatID: 1, UserID: 999, ChatType: ChatTypePrivate, Username: "spoofed"}); err != nil {
 		t.Fatal(err)
 	}
 	if len(client.Sent) != 1 || !strings.Contains(client.Sent[0].Text, "не привязан") {
@@ -27,7 +27,8 @@ func TestUserHandlersDoNotExposeUnlinkedProfiles(t *testing.T) {
 func TestStartInviteAndOwnStatus(t *testing.T) {
 	client := &testutil.FakeTelegramClient{}
 	date, _ := domain.NewDate(2026, time.September, 1)
-	user := domain.User{ID: 7, DisplayName: "Alice", MonthlyFeeMinor: 100000, Currency: "RUB", NextChargeOn: date}
+	chatID := int64(22)
+	user := domain.User{ID: 7, TelegramChatID: &chatID, DisplayName: "Alice", MonthlyFeeMinor: 100000, Currency: "RUB", NextChargeOn: date}
 	service := &fakeAccount{
 		consume: func(_ context.Context, params account.ConsumeInviteParams) (domain.User, error) {
 			if params.Token != "token" || params.TelegramUserID != 11 || params.TelegramChatID != 22 {
@@ -46,11 +47,11 @@ func TestStartInviteAndOwnStatus(t *testing.T) {
 			return []domain.LedgerEntry{{Kind: domain.LedgerKindPayment, AmountMinor: 50000}}, nil
 		},
 	}
-	bot := NewWithClient(client, service)
-	if err := bot.HandleStart(context.Background(), IncomingMessage{ChatID: 22, UserID: 11, Text: "/start token"}); err != nil {
+	bot := NewWithClient(client, service, LanguageRussian)
+	if err := bot.HandleStart(context.Background(), IncomingMessage{ChatID: 22, UserID: 11, ChatType: ChatTypePrivate, Text: "/start token"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := bot.HandleStatus(context.Background(), IncomingMessage{ChatID: 22, UserID: 11, Username: "another-name"}); err != nil {
+	if err := bot.HandleStatus(context.Background(), IncomingMessage{ChatID: 22, UserID: 11, ChatType: ChatTypePrivate, Username: "another-name"}); err != nil {
 		t.Fatal(err)
 	}
 	if len(client.Sent) != 2 || !strings.Contains(client.Sent[1].Text, "Долг: 25000 RUB") || !strings.Contains(client.Sent[1].Text, "Alice") {
@@ -65,9 +66,12 @@ func TestHistoryUsesAtMostTenEntries(t *testing.T) {
 	for i := range entries {
 		entries[i] = domain.LedgerEntry{ID: int64(i + 1), Kind: domain.LedgerKindPayment, AmountMinor: domain.AmountMinor(i + 1), OccurredAt: time.Date(2026, time.August, 28, 0, 0, i, 0, time.UTC)}
 	}
-	service := &fakeAccount{byTelegram: func(context.Context, int64) (domain.User, error) { return domain.User{ID: 1, NextChargeOn: date}, nil }, entries: func(context.Context, domain.UserID) ([]domain.LedgerEntry, error) { return entries, nil }}
-	bot := NewWithClient(client, service)
-	if err := bot.HandleHistory(context.Background(), IncomingMessage{ChatID: 1, UserID: 1}); err != nil {
+	chatID := int64(1)
+	service := &fakeAccount{byTelegram: func(context.Context, int64) (domain.User, error) {
+		return domain.User{ID: 1, TelegramChatID: &chatID, NextChargeOn: date}, nil
+	}, entries: func(context.Context, domain.UserID) ([]domain.LedgerEntry, error) { return entries, nil }}
+	bot := NewWithClient(client, service, LanguageRussian)
+	if err := bot.HandleHistory(context.Background(), IncomingMessage{ChatID: 1, UserID: 1, ChatType: ChatTypePrivate}); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Count(client.Sent[0].Text, "payment") != 10 {
@@ -79,11 +83,24 @@ func TestUserMessagesCanBeEnglish(t *testing.T) {
 	client := &testutil.FakeTelegramClient{}
 	service := &fakeAccount{byTelegram: func(context.Context, int64) (domain.User, error) { return domain.User{}, account.ErrNotFound }}
 	bot := NewWithClient(client, service, LanguageEnglish)
-	if err := bot.HandleStatus(context.Background(), IncomingMessage{ChatID: 1, UserID: 1}); err != nil {
+	if err := bot.HandleStatus(context.Background(), IncomingMessage{ChatID: 1, UserID: 1, ChatType: ChatTypePrivate}); err != nil {
 		t.Fatal(err)
 	}
 	if len(client.Sent) != 1 || !strings.Contains(client.Sent[0].Text, "Profile is not linked") {
 		t.Fatalf("sent = %#v", client.Sent)
+	}
+}
+
+func TestFormatStatusUsesTypedTemplateData(t *testing.T) {
+	nextCharge, err := domain.NewDate(2026, time.September, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := formatStatus(LanguageEnglish, domain.User{
+		DisplayName: "Alice", MonthlyFeeMinor: 100000, Currency: "RUB", NextChargeOn: nextCharge,
+	}, -25000, domain.LedgerEntry{}, false)
+	if !strings.Contains(got, "Debt: 25000 RUB") || !strings.Contains(got, "Fee: 100000 RUB") {
+		t.Fatalf("status = %q", got)
 	}
 }
 

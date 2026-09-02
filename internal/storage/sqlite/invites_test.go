@@ -155,6 +155,91 @@ func TestCreateInviteTokenRejectsUnknownUser(t *testing.T) {
 	}
 }
 
+func TestCreateInviteTokenReplacesUnusedAndPreservesUsedAudit(t *testing.T) {
+	ctx := context.Background()
+	store := newInviteStore(t, ctx)
+	now := time.Date(2026, time.September, 2, 10, 0, 0, 0, time.UTC)
+	user := createInviteUser(t, store, ctx, 1, now)
+
+	createInvite(t, store, ctx, "used-hash", user.ID, now, now.Add(time.Hour))
+	usedAt := now.Add(time.Minute)
+	if _, err := store.db.ExecContext(ctx, `UPDATE invite_tokens SET used_at = ? WHERE token_hash = ?`, usedAt.Unix(), "used-hash"); err != nil {
+		t.Fatal(err)
+	}
+	createInvite(t, store, ctx, "old-unused-hash", user.ID, now.Add(2*time.Minute), now.Add(time.Hour))
+	createInvite(t, store, ctx, "replacement-hash", user.ID, now.Add(3*time.Minute), now.Add(time.Hour))
+
+	rows, err := store.db.QueryContext(ctx, `SELECT token_hash, used_at FROM invite_tokens WHERE user_id = ? ORDER BY token_hash`, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+
+	tokens := make(map[string]bool)
+	for rows.Next() {
+		var tokenHash string
+		var tokenUsedAt *int64
+		if err := rows.Scan(&tokenHash, &tokenUsedAt); err != nil {
+			t.Fatal(err)
+		}
+		tokens[tokenHash] = tokenUsedAt != nil
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(tokens) != 2 || !tokens["used-hash"] || tokens["replacement-hash"] || tokens["old-unused-hash"] {
+		t.Fatalf("stored invite tokens = %#v", tokens)
+	}
+}
+
+func TestCreateInviteTokenReissueIsAtomicUnderConcurrency(t *testing.T) {
+	ctx := context.Background()
+	store := newInviteStore(t, ctx)
+	now := time.Date(2026, time.September, 2, 10, 0, 0, 0, time.UTC)
+	user := createInviteUser(t, store, ctx, 1, now)
+	createInvite(t, store, ctx, "initial-hash", user.ID, now, now.Add(time.Hour))
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	var group sync.WaitGroup
+	for _, tokenHash := range []string{"concurrent-a", "concurrent-b"} {
+		tokenHash := tokenHash
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			<-start
+			errs <- store.CreateInviteToken(ctx, account.CreateInviteTokenRecord{
+				TokenHash: tokenHash,
+				UserID:    user.ID,
+				CreatedAt: now.Add(time.Minute),
+				ExpiresAt: now.Add(time.Hour),
+			})
+		}()
+	}
+	close(start)
+	group.Wait()
+	close(errs)
+
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("CreateInviteToken() error = %v", err)
+		}
+	}
+
+	var count int
+	var survivor string
+	if err := store.db.QueryRowContext(ctx, `
+		SELECT COUNT(*), COALESCE(MAX(token_hash), '')
+		FROM invite_tokens
+		WHERE user_id = ? AND used_at IS NULL
+	`, user.ID).Scan(&count, &survivor); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 || (survivor != "concurrent-a" && survivor != "concurrent-b") {
+		t.Fatalf("unused count = %d, survivor = %q", count, survivor)
+	}
+}
+
 func newInviteStore(t *testing.T, ctx context.Context) *Store {
 	t.Helper()
 	store := newTestSQLite(t, ctx)

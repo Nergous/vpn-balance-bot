@@ -7,14 +7,15 @@ import (
 	"time"
 
 	"github.com/Nergous/vpn-balance-bot/internal/domain"
+	"github.com/Nergous/vpn-balance-bot/internal/localization"
 )
 
 func TestDeliverReservesBeforeSending(t *testing.T) {
 	chatID := int64(10)
 	now := time.Date(2026, time.August, 28, 0, 0, 0, 0, time.UTC)
-	storage := &fakeStorage{created: true}
+	storage := &fakeStorage{reserved: true, attempt: 1}
 	sender := &fakeSender{messageID: 7}
-	service, err := New(storage, sender)
+	service, err := New(storage, sender, localization.Russian)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -29,19 +30,70 @@ func TestDeliverReservesBeforeSending(t *testing.T) {
 func TestDeliverDoesNotSendDuplicateOrFailure(t *testing.T) {
 	chatID := int64(10)
 	date, _ := domain.NewDate(2026, time.September, 1)
-	storage := &fakeStorage{created: false}
+	storage := &fakeStorage{reserved: false, attempt: 1}
 	sender := &fakeSender{}
-	service, _ := New(storage, sender)
+	service, _ := New(storage, sender, localization.Russian)
 	created, err := service.Deliver(context.Background(), domain.User{ID: 1, TelegramChatID: &chatID}, date, date, domain.ReminderTypeManual, "test")
 	if err != nil || created || sender.calls != 0 {
 		t.Fatalf("duplicate = %t, %v, calls=%d", created, err, sender.calls)
 	}
 
-	storage.created = true
-	sender.err = errors.New("network")
+	storage.reserved = true
+	senderErr := errors.New("network")
+	sender.err = senderErr
 	created, err = service.Deliver(context.Background(), domain.User{ID: 1, TelegramChatID: &chatID}, date, date, domain.ReminderTypeManual, "test")
-	if err != nil || created || len(storage.updated) != 1 || storage.updated[0].Status != domain.ReminderStatusFailed {
+	if !errors.Is(err, senderErr) || created || len(storage.updated) != 1 || storage.updated[0].Status != domain.ReminderStatusFailed {
 		t.Fatalf("failure = %t, %v, updates=%#v", created, err, storage.updated)
+	}
+}
+
+func TestDeliverJoinsSenderAndPersistenceErrors(t *testing.T) {
+	chatID := int64(10)
+	date := mustDate(t, 2026, time.September, 1)
+	senderErr := errors.New("transport")
+	persistenceErr := errors.New("persistence")
+	storage := &fakeStorage{reserved: true, attempt: 1, updateErr: persistenceErr}
+	service, _ := New(storage, &fakeSender{err: senderErr}, localization.Russian)
+
+	created, err := service.Deliver(context.Background(), domain.User{ID: 1, TelegramChatID: &chatID}, date, date, domain.ReminderTypeManual, "test")
+	if created || !errors.Is(err, senderErr) || !errors.Is(err, persistenceErr) {
+		t.Fatalf("Deliver() = %t, %v", created, err)
+	}
+}
+
+func TestDeliverOnlyMarksDefiniteFailuresRetryable(t *testing.T) {
+	chatID := int64(10)
+	date := mustDate(t, 2026, time.September, 1)
+	for _, tc := range []struct {
+		name          string
+		code          DeliveryErrorCode
+		attempt       int
+		wantRetry     bool
+		wantRetryWait time.Duration
+	}{
+		{"definite transient", DeliveryErrorRetryable, 1, true, time.Minute},
+		{"ambiguous", DeliveryErrorUnknown, 1, false, 0},
+		{"sent outcome unavailable", DeliveryErrorFailed, 1, false, 0},
+		{"retry limit", DeliveryErrorRetryable, maxDeliveryAttempts, false, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			senderErr := errors.New("send")
+			storage := &fakeStorage{reserved: true, attempt: tc.attempt}
+			service, _ := New(storage, &fakeSender{err: senderErr, code: tc.code}, localization.Russian)
+			service.now = func() time.Time { return time.Date(2026, time.September, 1, 12, 0, 0, 0, time.UTC) }
+
+			_, err := service.Deliver(context.Background(), domain.User{ID: 1, TelegramChatID: &chatID}, date, date, domain.ReminderTypeManual, "test")
+			if !errors.Is(err, senderErr) || errors.Is(err, ErrRetryableDelivery) != tc.wantRetry {
+				t.Fatalf("error = %v, retryable=%t", err, errors.Is(err, ErrRetryableDelivery))
+			}
+			if tc.wantRetry {
+				if storage.retryAt[0] == nil || storage.retryAt[0].Sub(service.now()) != tc.wantRetryWait {
+					t.Fatalf("retry at = %#v", storage.retryAt[0])
+				}
+			} else if storage.retryAt[0] != nil {
+				t.Fatalf("unexpected retry at %s", storage.retryAt[0])
+			}
+		})
 	}
 }
 
@@ -50,15 +102,18 @@ func TestProcessSelectsAndDeliversAutomaticReminder(t *testing.T) {
 	next := mustDate(t, 2026, time.September, 10)
 	today := mustDate(t, 2026, time.September, 7)
 	storage := &fakeStorage{
-		created: true,
-		users: []domain.User{{
-			ID: 1, TelegramChatID: &chatID, Status: domain.UserStatusActive,
-			MonthlyFeeMinor: 100, NextChargeOn: next,
+		reserved: true,
+		attempt:  1,
+		candidates: []Candidate{{
+			User: domain.User{
+				ID: 1, TelegramChatID: &chatID, Status: domain.UserStatusActive,
+				MonthlyFeeMinor: 100, NextChargeOn: next,
+			},
+			Balance: 0,
 		}},
-		balances: map[domain.UserID]domain.AmountMinor{1: 0},
 	}
 	sender := &fakeSender{messageID: 7}
-	service, err := New(storage, sender)
+	service, err := New(storage, sender, localization.Russian)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,12 +143,12 @@ func TestDeliverClassifiesAmbiguousAndUnreachableErrors(t *testing.T) {
 		{"unreachable", errors.New("forbidden"), DeliveryErrorOffline},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			storage := &fakeStorage{created: true}
+			storage := &fakeStorage{reserved: true, attempt: 1}
 			sender := &fakeSender{err: tc.err, code: tc.code}
-			service, _ := New(storage, sender)
+			service, _ := New(storage, sender, localization.Russian)
 			_, err := service.Deliver(context.Background(), domain.User{ID: 1, TelegramChatID: &chatID}, date, date, domain.ReminderTypeManual, "test")
-			if err != nil {
-				t.Fatal(err)
+			if !errors.Is(err, tc.err) {
+				t.Fatalf("Deliver() error = %v", err)
 			}
 			if got := *storage.updated[0].ErrorCode; got != string(tc.code) {
 				t.Fatalf("error code = %q, want %q", got, tc.code)
@@ -107,56 +162,106 @@ func TestProcessContinuesAfterUserError(t *testing.T) {
 	next := mustDate(t, 2026, time.September, 10)
 	today := mustDate(t, 2026, time.September, 7)
 	storage := &fakeStorage{
-		created: true,
-		users: []domain.User{
-			{ID: 1, TelegramChatID: &chatID, Status: domain.UserStatusActive, MonthlyFeeMinor: 100, NextChargeOn: next},
-			{ID: 2, TelegramChatID: &chatID, Status: domain.UserStatusActive, MonthlyFeeMinor: 100, NextChargeOn: next},
+		reserved: true,
+		attempt:  1,
+		candidates: []Candidate{
+			{User: domain.User{ID: 1, TelegramChatID: &chatID, Status: domain.UserStatusActive, MonthlyFeeMinor: 100, NextChargeOn: next}, Balance: 0},
+			{User: domain.User{ID: 2, TelegramChatID: &chatID, Status: domain.UserStatusActive, MonthlyFeeMinor: 100, NextChargeOn: next}, Balance: 0},
 		},
-		balances:      map[domain.UserID]domain.AmountMinor{2: 0},
-		balanceErrors: map[domain.UserID]error{1: errors.New("database unavailable")},
 	}
-	service, _ := New(storage, &fakeSender{})
+	service, _ := New(storage, &fakeSender{errs: []error{errors.New("transport"), nil}}, localization.Russian)
 	delivered, err := service.Process(context.Background(), today)
 	if delivered != 1 || err == nil {
 		t.Fatalf("Process() = %d, %v", delivered, err)
 	}
 }
 
-type fakeStorage struct {
-	created       bool
-	updated       []domain.ReminderDelivery
-	users         []domain.User
-	balances      map[domain.UserID]domain.AmountMinor
-	balanceErrors map[domain.UserID]error
+func TestProcessUsesLatestChargedPeriodAfterCatchUp(t *testing.T) {
+	chatID := int64(10)
+	charged := mustDate(t, 2026, time.September, 1)
+	next := mustDate(t, 2026, time.October, 1)
+	storage := &fakeStorage{
+		reserved: true,
+		attempt:  1,
+		candidates: []Candidate{{
+			User: domain.User{
+				ID: 1, TelegramChatID: &chatID, Status: domain.UserStatusActive,
+				MonthlyFeeMinor: 100, NextChargeOn: next,
+			},
+			Balance:              -100,
+			LatestChargePeriodOn: &charged,
+		}},
+	}
+	service, _ := New(storage, &fakeSender{messageID: 7}, localization.Russian)
+
+	delivered, err := service.Process(context.Background(), charged)
+	if err != nil || delivered != 1 {
+		t.Fatalf("Process() = %d, %v", delivered, err)
+	}
+	if got := storage.reservations[0]; got.BillingDate != charged || got.ReminderType != domain.ReminderTypeChargeDebt {
+		t.Fatalf("reservation = %#v", got)
+	}
 }
 
-func (f *fakeStorage) CreateReminderDelivery(_ context.Context, d domain.ReminderDelivery) (domain.ReminderDelivery, bool, error) {
-	return d, f.created, nil
+func TestConfirmUnknownNotSentUsesExplicitReconciliation(t *testing.T) {
+	date := mustDate(t, 2026, time.September, 1)
+	storage := &fakeStorage{unknownMarked: true}
+	service, _ := New(storage, &fakeSender{}, localization.Russian)
+
+	marked, err := service.ConfirmUnknownNotSent(context.Background(), 1, date, domain.ReminderTypeManual)
+	if err != nil || !marked || storage.unknownCalls != 1 {
+		t.Fatalf("ConfirmUnknownNotSent() = %t, %v, calls=%d", marked, err, storage.unknownCalls)
+	}
 }
-func (f *fakeStorage) UpdateReminderDelivery(_ context.Context, d domain.ReminderDelivery) error {
+
+type fakeStorage struct {
+	reserved      bool
+	attempt       int
+	reservations  []domain.ReminderDelivery
+	updated       []domain.ReminderDelivery
+	retryAt       []*time.Time
+	updateErr     error
+	candidates    []Candidate
+	candidateErr  error
+	unknownMarked bool
+	unknownCalls  int
+}
+
+func (f *fakeStorage) ReminderCandidates(context.Context, domain.Date) ([]Candidate, error) {
+	return f.candidates, f.candidateErr
+}
+func (f *fakeStorage) ReserveReminderDelivery(_ context.Context, d domain.ReminderDelivery, _ int) (domain.ReminderDelivery, int, bool, error) {
+	f.reservations = append(f.reservations, d)
+	attempt := f.attempt
+	if attempt == 0 {
+		attempt = 1
+	}
+	return d, attempt, f.reserved, nil
+}
+func (f *fakeStorage) UpdateReminderDeliveryAttempt(_ context.Context, d domain.ReminderDelivery, retryAt *time.Time) error {
 	f.updated = append(f.updated, d)
-	return nil
+	f.retryAt = append(f.retryAt, retryAt)
+	return f.updateErr
 }
 func (f *fakeStorage) MarkPendingUnknown(context.Context, time.Time) (int, error) { return 0, nil }
-func (f *fakeStorage) ListUsers(context.Context, *domain.UserStatus) ([]domain.User, error) {
-	return f.users, nil
-}
-func (f *fakeStorage) Balance(_ context.Context, userID domain.UserID) (domain.AmountMinor, error) {
-	if err := f.balanceErrors[userID]; err != nil {
-		return 0, err
-	}
-	return f.balances[userID], nil
+func (f *fakeStorage) MarkUnknownRetryable(context.Context, domain.UserID, domain.Date, domain.ReminderType, time.Time, int) (bool, error) {
+	f.unknownCalls++
+	return f.unknownMarked, nil
 }
 
 type fakeSender struct {
 	calls     int
 	messageID int
 	err       error
+	errs      []error
 	code      DeliveryErrorCode
 }
 
 func (f *fakeSender) SendReminder(context.Context, int64, string) (int, error) {
 	f.calls++
+	if f.calls <= len(f.errs) {
+		return f.messageID, f.errs[f.calls-1]
+	}
 	return f.messageID, f.err
 }
 func (f *fakeSender) ClassifyReminderError(error) DeliveryErrorCode { return f.code }

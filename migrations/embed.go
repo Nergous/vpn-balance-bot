@@ -18,10 +18,17 @@ var migrations = []Migration{
 		Version: "001_initial.sql",
 		SQL:     initialSQL,
 	},
+	{
+		Version: "002_reminder_delivery_retries.sql",
+		SQL:     reminderDeliveryRetriesSQL,
+	},
 }
 
 //go:embed 001_initial.sql
 var initialSQL string
+
+//go:embed 002_reminder_delivery_retries.sql
+var reminderDeliveryRetriesSQL string
 
 func All() []Migration {
 	ret := make([]Migration, len(migrations))
@@ -32,7 +39,6 @@ func All() []Migration {
 	return ret
 }
 
-// SchemaMigrationsSQL returns the idempotent bootstrap schema for migration metadata.
 func SchemaMigrationsSQL() string {
 	return schemaMigrationsSQL
 }

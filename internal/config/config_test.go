@@ -153,6 +153,7 @@ func TestValidateConfig(t *testing.T) {
 		TelegramBotToken: "token", AdminTelegramID: 1, DatabasePath: "data/bot.db",
 		AppTimezone: "UTC", ReminderHour: 9, InviteTTL: time.Hour,
 		LogLevel: InfoLevel, AppEnv: EnvTest, BotLanguage: BotLanguageRussian,
+		HTTPTimeout: time.Second, DBTimeout: time.Second,
 	}
 	if err := validateConfig(valid); err != nil {
 		t.Fatal(err)
@@ -164,6 +165,8 @@ func TestValidateConfig(t *testing.T) {
 	invalid.AppTimezone = "Invalid/Timezone"
 	invalid.ReminderHour = 24
 	invalid.InviteTTL = 0
+	invalid.HTTPTimeout = 0
+	invalid.DBTimeout = -time.Second
 	invalid.LogLevel = "trace"
 	invalid.BotLanguage = "de"
 	invalid.AppEnv = EnvProduction
@@ -171,6 +174,7 @@ func TestValidateConfig(t *testing.T) {
 	for _, want := range []error{
 		ErrTelegramBotTokenRequired, ErrAdminTelegramIDInvalid,
 		ErrInvalidTimezone, ErrInvalidReminderHour, ErrInvalidInviteTTL,
+		ErrInvalidHTTPTimeout, ErrInvalidDBTimeout,
 		ErrInvalidLogLevel, ErrUnsafeProductionDatabase,
 		ErrInvalidBotLanguage,
 	} {
@@ -188,14 +192,39 @@ func TestValidateConfig(t *testing.T) {
 
 func TestLoadBotLanguage(t *testing.T) {
 	setBaseEnvironment(t, EnvTest)
-	t.Setenv("BOT_LANG", " EN ")
 	cfg, err := Load(context.Background())
+	if err != nil || cfg.BotLanguage != BotLanguageRussian {
+		t.Fatalf("Load() default language = %q, %v", cfg.BotLanguage, err)
+	}
+
+	t.Setenv("BOT_LANG", " EN ")
+	cfg, err = Load(context.Background())
 	if err != nil || cfg.BotLanguage != BotLanguageEnglish {
 		t.Fatalf("Load() language = %q, %v", cfg.BotLanguage, err)
 	}
 	t.Setenv("BOT_LANG", "de")
 	if _, err := Load(context.Background()); !errors.Is(err, ErrInvalidBotLanguage) {
 		t.Fatalf("invalid BOT_LANG error = %v", err)
+	}
+}
+
+func TestLoadRejectsNonPositiveTimeouts(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		key   string
+		value string
+		want  error
+	}{
+		{name: "zero HTTP timeout", key: "HTTP_TIMEOUT", value: "0s", want: ErrInvalidHTTPTimeout},
+		{name: "negative DB timeout", key: "DB_TIMEOUT", value: "-1s", want: ErrInvalidDBTimeout},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			setBaseEnvironment(t, EnvTest)
+			t.Setenv(test.key, test.value)
+			if _, err := Load(context.Background()); !errors.Is(err, test.want) {
+				t.Fatalf("Load() error = %v, want %v", err, test.want)
+			}
+		})
 	}
 }
 
@@ -392,6 +421,7 @@ func clearConfigEnvironment(t *testing.T) {
 	for _, key := range []string{
 		"APP_ENV", "TELEGRAM_BOT_TOKEN", "ADMIN_TELEGRAM_ID", "DATABASE_PATH",
 		"APP_TIMEZONE", "REMINDER_HOUR", "INVITE_TTL", "LOG_LEVEL", "BOT_LANG",
+		"HTTP_TIMEOUT", "DB_TIMEOUT",
 	} {
 		t.Setenv(key, "")
 	}

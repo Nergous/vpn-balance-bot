@@ -13,7 +13,8 @@ import (
 	sqlite3 "modernc.org/sqlite/lib"
 )
 
-func (s *Store) UsersDueForCharge(ctx context.Context, asOf domain.Date) ([]domain.User, error) {
+// UsersDueForCharge returns active users with a billing date on or before asOf.
+func (s *Store) UsersDueForCharge(ctx context.Context, asOf domain.Date, limit int) ([]domain.User, error) {
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
@@ -22,10 +23,13 @@ func (s *Store) UsersDueForCharge(ctx context.Context, asOf domain.Date) ([]doma
 		FROM users
 		WHERE status = ? AND next_charge_on <= ?
 		ORDER BY next_charge_on ASC, id ASC
-	`, domain.UserStatusActive, asOf.String())
+		LIMIT ?
+	`, domain.UserStatusActive, asOf.String(), limit)
+
 	if err != nil {
 		return nil, fmt.Errorf("select users due for charge: %w", err)
 	}
+
 	defer rows.Close()
 
 	users := make([]domain.User, 0)
@@ -34,8 +38,10 @@ func (s *Store) UsersDueForCharge(ctx context.Context, asOf domain.Date) ([]doma
 		if err != nil {
 			return nil, fmt.Errorf("scan user due for charge: %w", err)
 		}
+
 		users = append(users, user)
 	}
+
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate users due for charge: %w", err)
 	}
@@ -43,6 +49,8 @@ func (s *Store) UsersDueForCharge(ctx context.Context, asOf domain.Date) ([]doma
 	return users, nil
 }
 
+// ReserveSubscriptionCharge atomically creates one charge and advances its next date.
+// created is false when another worker already processed the same billing period.
 func (s *Store) ReserveSubscriptionCharge(ctx context.Context, params billing.ReserveSubscriptionChargeParams) (domain.LedgerEntry, bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
@@ -51,15 +59,18 @@ func (s *Store) ReserveSubscriptionCharge(ctx context.Context, params billing.Re
 	if err != nil {
 		return domain.LedgerEntry{}, false, fmt.Errorf("start subscription charge transaction: %w", err)
 	}
+
 	defer tx.Rollback()
 
 	user, err := scanUser(tx.QueryRowContext(ctx, `SELECT `+userColumns+` FROM users WHERE id = ?`, params.UserID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.LedgerEntry{}, false, nil
 	}
+
 	if err != nil {
 		return domain.LedgerEntry{}, false, fmt.Errorf("read billing user: %w", err)
 	}
+
 	if user.Status != domain.UserStatusActive || user.NextChargeOn != params.BillingPeriodOn {
 		return domain.LedgerEntry{}, false, nil
 	}
@@ -68,6 +79,7 @@ func (s *Store) ReserveSubscriptionCharge(ctx context.Context, params billing.Re
 	if err != nil {
 		return domain.LedgerEntry{}, false, fmt.Errorf("calculate next charge date: %w", err)
 	}
+
 	billingPeriodOn := user.NextChargeOn
 	entry, err := insertLedgerEntry(ctx, tx, domain.LedgerEntry{
 		UserID:          user.ID,
@@ -77,10 +89,12 @@ func (s *Store) ReserveSubscriptionCharge(ctx context.Context, params billing.Re
 		BillingPeriodOn: &billingPeriodOn,
 		CreatedAt:       params.UpdatedAt,
 	})
+
 	if err != nil {
 		if isSubscriptionChargeConflict(err) {
 			return domain.LedgerEntry{}, false, nil
 		}
+
 		return domain.LedgerEntry{}, false, err
 	}
 
@@ -90,10 +104,12 @@ func (s *Store) ReserveSubscriptionCharge(ctx context.Context, params billing.Re
 	if err != nil {
 		return domain.LedgerEntry{}, false, fmt.Errorf("advance next charge date: %w", err)
 	}
+
 	updated, err := result.RowsAffected()
 	if err != nil {
 		return domain.LedgerEntry{}, false, fmt.Errorf("check next charge date update: %w", err)
 	}
+
 	if updated != 1 {
 		return domain.LedgerEntry{}, false, fmt.Errorf("advance next charge date: unexpected updated rows %d", updated)
 	}

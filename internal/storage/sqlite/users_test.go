@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -135,6 +136,48 @@ func TestListUsersWithOptionalStatus(t *testing.T) {
 	}
 }
 
+func TestListUsersPageAndStatusCounts(t *testing.T) {
+	store := testutil.NewSQLite(t)
+	ctx := context.Background()
+	statuses := []domain.UserStatus{
+		domain.UserStatusActive,
+		domain.UserStatusPaused,
+		domain.UserStatusDisabled,
+		domain.UserStatusActive,
+		domain.UserStatusPaused,
+	}
+	for index, status := range statuses {
+		if _, err := store.CreateUser(ctx, newUser(t, index+1, status)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	page, hasMore, err := store.ListUsersPage(ctx, nil, 1, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page) != 2 || page[0].ID != 2 || page[1].ID != 3 || !hasMore {
+		t.Fatalf("page=%#v hasMore=%v", page, hasMore)
+	}
+	active := domain.UserStatusActive
+	page, hasMore, err = store.ListUsersPage(ctx, &active, 1, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page) != 1 || page[0].ID != 4 || hasMore {
+		t.Fatalf("active page=%#v hasMore=%v", page, hasMore)
+	}
+
+	counts, err := store.UserStatusCounts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := account.UserStatusCounts{Total: 5, Active: 2, Paused: 2, Disabled: 1}
+	if counts != want {
+		t.Fatalf("counts=%#v want=%#v", counts, want)
+	}
+}
+
 func TestUserMutations(t *testing.T) {
 	store := testutil.NewSQLite(t)
 	ctx := context.Background()
@@ -184,6 +227,92 @@ func TestUserMutations(t *testing.T) {
 	}
 	if disabled.Status != domain.UserStatusDisabled || disabled.NextChargeOn != nextChargeOn || !disabled.UpdatedAt.Equal(disabledAt) {
 		t.Fatalf("DisableUser() = %#v", disabled)
+	}
+}
+
+func TestUserLifecycleRejectsInvalidTransitions(t *testing.T) {
+	store := testutil.NewSQLite(t)
+	ctx := context.Background()
+	active, err := store.CreateUser(ctx, newUser(t, 1, domain.UserStatusActive))
+	if err != nil {
+		t.Fatal(err)
+	}
+	paused, err := store.CreateUser(ctx, newUser(t, 2, domain.UserStatusPaused))
+	if err != nil {
+		t.Fatal(err)
+	}
+	disabled, err := store.CreateUser(ctx, newUser(t, 3, domain.UserStatusDisabled))
+	if err != nil {
+		t.Fatal(err)
+	}
+	nextChargeOn, err := domain.NewDate(2026, time.October, 17)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updatedAt := time.Date(2026, time.September, 2, 12, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name string
+		call func() error
+	}{
+		{name: "pause paused", call: func() error { _, err := store.PauseUser(ctx, paused.ID, updatedAt); return err }},
+		{name: "resume active", call: func() error { _, err := store.ResumeUser(ctx, active.ID, nextChargeOn, updatedAt); return err }},
+		{name: "pause disabled", call: func() error { _, err := store.PauseUser(ctx, disabled.ID, updatedAt); return err }},
+		{name: "resume disabled", call: func() error { _, err := store.ResumeUser(ctx, disabled.ID, nextChargeOn, updatedAt); return err }},
+		{name: "disable disabled", call: func() error { _, err := store.DisableUser(ctx, disabled.ID, updatedAt); return err }},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := test.call()
+			if !errors.Is(err, account.ErrInvalidUserStatusTransition) {
+				t.Fatalf("error = %v, want %v", err, account.ErrInvalidUserStatusTransition)
+			}
+			if errors.Is(err, account.ErrNotFound) {
+				t.Fatalf("error = %v, must not report not found", err)
+			}
+		})
+	}
+}
+
+func TestPauseUserTransitionIsAtomicUnderConcurrency(t *testing.T) {
+	store := testutil.NewSQLite(t)
+	ctx := context.Background()
+	user, err := store.CreateUser(ctx, newUser(t, 1, domain.UserStatusActive))
+	if err != nil {
+		t.Fatal(err)
+	}
+	updatedAt := time.Date(2026, time.September, 2, 12, 0, 0, 0, time.UTC)
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	var group sync.WaitGroup
+	for range 2 {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			<-start
+			_, err := store.PauseUser(ctx, user.ID, updatedAt)
+			errs <- err
+		}()
+	}
+	close(start)
+	group.Wait()
+	close(errs)
+
+	var successCount, invalidTransitionCount int
+	for err := range errs {
+		switch {
+		case err == nil:
+			successCount++
+		case errors.Is(err, account.ErrInvalidUserStatusTransition):
+			invalidTransitionCount++
+		default:
+			t.Fatalf("PauseUser() error = %v", err)
+		}
+	}
+	if successCount != 1 || invalidTransitionCount != 1 {
+		t.Fatalf("successes = %d, invalid transitions = %d", successCount, invalidTransitionCount)
 	}
 }
 

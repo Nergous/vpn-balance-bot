@@ -33,7 +33,7 @@ func TestCatchUpRepeatsUntilNoPeriodsDue(t *testing.T) {
 	second := testDate(t, 2026, time.February, 28)
 	user := domain.User{ID: 1, NextChargeOn: first}
 	storage := &fakeStorage{}
-	storage.usersDue = func(context.Context, domain.Date) ([]domain.User, error) {
+	storage.usersDue = func(context.Context, domain.Date, int) ([]domain.User, error) {
 		storage.usersDueCalls++
 		switch storage.usersDueCalls {
 		case 1:
@@ -59,17 +59,61 @@ func TestCatchUpRepeatsUntilNoPeriodsDue(t *testing.T) {
 	}
 }
 
+func TestCatchUpStopsAtLimitAndContinuesIdempotently(t *testing.T) {
+	periods := []domain.Date{
+		testDate(t, 2026, time.January, 31),
+		testDate(t, 2026, time.February, 28),
+		testDate(t, 2026, time.March, 31),
+	}
+	next := 0
+	storage := &fakeStorage{
+		usersDue: func(_ context.Context, _ domain.Date, limit int) ([]domain.User, error) {
+			if limit < 1 {
+				t.Fatalf("limit = %d", limit)
+			}
+			if next == len(periods) {
+				return nil, nil
+			}
+			return []domain.User{{ID: 1, NextChargeOn: periods[next]}}, nil
+		},
+		reserve: func(_ context.Context, params ReserveSubscriptionChargeParams) (domain.LedgerEntry, bool, error) {
+			if params.BillingPeriodOn != periods[next] {
+				t.Fatalf("billing period = %s, want %s", params.BillingPeriodOn, periods[next])
+			}
+			next++
+			return domain.LedgerEntry{}, true, nil
+		},
+	}
+	service := newService(storage, time.Now)
+	service.maxChargesPerRun = 2
+
+	created, err := service.CatchUp(context.Background(), periods[len(periods)-1])
+	if created != 2 || !errors.Is(err, ErrCatchUpLimitReached) {
+		t.Fatalf("first CatchUp() = %d, %v", created, err)
+	}
+
+	created, err = service.CatchUp(context.Background(), periods[len(periods)-1])
+	if created != 1 || err != nil {
+		t.Fatalf("continued CatchUp() = %d, %v", created, err)
+	}
+
+	created, err = service.CatchUp(context.Background(), periods[len(periods)-1])
+	if created != 0 || err != nil {
+		t.Fatalf("idempotent CatchUp() = %d, %v", created, err)
+	}
+}
+
 type fakeStorage struct {
-	usersDue      func(context.Context, domain.Date) ([]domain.User, error)
+	usersDue      func(context.Context, domain.Date, int) ([]domain.User, error)
 	reserve       func(context.Context, ReserveSubscriptionChargeParams) (domain.LedgerEntry, bool, error)
 	usersDueCalls int
 }
 
-func (f *fakeStorage) UsersDueForCharge(ctx context.Context, asOf domain.Date) ([]domain.User, error) {
+func (f *fakeStorage) UsersDueForCharge(ctx context.Context, asOf domain.Date, limit int) ([]domain.User, error) {
 	if f.usersDue == nil {
 		return nil, errors.New("unexpected UsersDueForCharge call")
 	}
-	return f.usersDue(ctx, asOf)
+	return f.usersDue(ctx, asOf, limit)
 }
 
 func (f *fakeStorage) ReserveSubscriptionCharge(ctx context.Context, params ReserveSubscriptionChargeParams) (domain.LedgerEntry, bool, error) {

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Nergous/vpn-balance-bot/internal/domain"
+	"github.com/Nergous/vpn-balance-bot/internal/localization"
 )
 
 var (
@@ -14,25 +15,36 @@ var (
 	ErrNilSender  = errors.New("reminder sender is nil")
 )
 
+const maxDeliveryAttempts = 3
+
+// Service selects, reserves, and delivers customer reminders.
 type Service struct {
 	storage  Storage
 	sender   Sender
 	now      func() time.Time
-	language string
+	language localization.Language
 }
 
-func New(storage Storage, sender Sender, language ...string) (*Service, error) {
+// New creates a reminder service for a supported localization catalog.
+func New(storage Storage, sender Sender, language localization.Language) (*Service, error) {
 	if storage == nil {
 		return nil, ErrNilStorage
 	}
+
 	if sender == nil {
 		return nil, ErrNilSender
 	}
-	selected := "ru"
-	if len(language) > 0 && language[0] == "en" {
-		selected = "en"
+
+	if _, err := localization.New(language); err != nil {
+		return nil, err
 	}
-	return &Service{storage: storage, sender: sender, now: time.Now, language: selected}, nil
+
+	return &Service{
+		storage:  storage,
+		sender:   sender,
+		now:      time.Now,
+		language: language,
+	}, nil
 }
 
 // RecoverPending marks deliveries left pending by a prior process as unknown.
@@ -46,37 +58,36 @@ func (s *Service) Process(ctx context.Context, today domain.Date) (int, error) {
 	if !today.IsValid() {
 		return 0, domain.ErrInvalidDate
 	}
+
 	if _, err := s.RecoverPending(ctx); err != nil {
 		return 0, fmt.Errorf("recover pending reminder deliveries: %w", err)
 	}
 
-	status := domain.UserStatusActive
-	users, err := s.storage.ListUsers(ctx, &status)
+	candidates, err := s.storage.ReminderCandidates(ctx, today)
 	if err != nil {
-		return 0, fmt.Errorf("list active reminder users: %w", err)
+		return 0, fmt.Errorf("list reminder candidates: %w", err)
 	}
 
 	delivered := 0
 	var processErrors []error
-	for _, user := range users {
-		balance, err := s.storage.Balance(ctx, user.ID)
-		if err != nil {
-			processErrors = append(processErrors, fmt.Errorf("get balance for reminder user %d: %w", user.ID, err))
-			continue
-		}
-		reminderType, ok := SelectAutomatic(user, balance, today)
+
+	for _, candidate := range candidates {
+		reminderType, billingDate, ok := SelectAutomatic(candidate, today)
 		if !ok {
 			continue
 		}
-		created, err := s.Deliver(ctx, user, user.NextChargeOn, today, reminderType, automaticText(s.language, reminderType))
+
+		created, err := s.Deliver(ctx, candidate.User, billingDate, today, reminderType, automaticText(s.language, reminderType))
 		if err != nil {
-			processErrors = append(processErrors, fmt.Errorf("deliver %s reminder to user %d: %w", reminderType, user.ID, err))
+			processErrors = append(processErrors, fmt.Errorf("deliver %s reminder to user %d: %w", reminderType, candidate.User.ID, err))
 			continue
 		}
+
 		if created {
 			delivered++
 		}
 	}
+
 	return delivered, errors.Join(processErrors...)
 }
 
@@ -87,6 +98,7 @@ func (s *Service) DeliverManual(ctx context.Context, user domain.User, text stri
 	if err != nil {
 		return false, err
 	}
+
 	return s.Deliver(ctx, user, user.NextChargeOn, today, domain.ReminderTypeManual, text)
 }
 
@@ -97,22 +109,42 @@ func (s *Service) Deliver(ctx context.Context, user domain.User, billingDate, sc
 	}
 
 	now := s.now().UTC().Truncate(time.Second)
-	delivery, created, err := s.storage.CreateReminderDelivery(ctx, domain.ReminderDelivery{
-		UserID: user.ID, BillingDate: billingDate, ScheduledDate: scheduledDate,
-		ReminderType: reminderType, Status: domain.ReminderStatusPending,
-		CreatedAt: now, UpdatedAt: now,
-	})
-	if err != nil || !created {
+	delivery, attempt, reserved, err := s.storage.ReserveReminderDelivery(ctx, domain.ReminderDelivery{
+		UserID:        user.ID,
+		BillingDate:   billingDate,
+		ScheduledDate: scheduledDate,
+		ReminderType:  reminderType,
+		Status:        domain.ReminderStatusPending,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}, maxDeliveryAttempts)
+	if err != nil || !reserved {
 		return false, err
 	}
 
 	messageID, err := s.sender.SendReminder(ctx, *user.TelegramChatID, text)
 	if err != nil {
-		code := string(classifyDeliveryError(s.sender, err))
+		classification := classifyDeliveryError(s.sender, err)
+		code := string(classification)
 		delivery.Status = domain.ReminderStatusFailed
 		delivery.ErrorCode = &code
 		delivery.UpdatedAt = s.now().UTC().Truncate(time.Second)
-		return false, s.storage.UpdateReminderDelivery(ctx, delivery)
+		var retryAt *time.Time
+		if classification == DeliveryErrorRetryable && attempt < maxDeliveryAttempts {
+			nextAttempt := delivery.UpdatedAt.Add(deliveryRetryBackoff(attempt))
+			retryAt = &nextAttempt
+		}
+
+		updateErr := s.storage.UpdateReminderDeliveryAttempt(ctx, delivery, retryAt)
+		resultErr := err
+		if retryAt != nil {
+			resultErr = errors.Join(resultErr, ErrRetryableDelivery)
+		}
+		if updateErr != nil {
+			resultErr = errors.Join(resultErr, updateErr)
+		}
+
+		return false, resultErr
 	}
 
 	delivery.Status = domain.ReminderStatusSent
@@ -120,39 +152,43 @@ func (s *Service) Deliver(ctx context.Context, user domain.User, billingDate, sc
 	telegramMessageID := int64(messageID)
 	delivery.TelegramMessageID = &telegramMessageID
 	delivery.UpdatedAt = now
-	if err := s.storage.UpdateReminderDelivery(ctx, delivery); err != nil {
+	if err := s.storage.UpdateReminderDeliveryAttempt(ctx, delivery, nil); err != nil {
 		return false, err
 	}
+
 	return true, nil
 }
 
-func automaticText(language string, reminderType domain.ReminderType) string {
-	english := language == "en"
+// ConfirmUnknownNotSent makes an ambiguous delivery retryable only after an
+// operator or reconciliation process has confirmed that no message was sent.
+func (s *Service) ConfirmUnknownNotSent(ctx context.Context, userID domain.UserID, billingDate domain.Date, reminderType domain.ReminderType) (bool, error) {
+	return s.storage.MarkUnknownRetryable(
+		ctx,
+		userID,
+		billingDate,
+		reminderType,
+		s.now().UTC().Truncate(time.Second),
+		maxDeliveryAttempts,
+	)
+}
+
+func deliveryRetryBackoff(attempt int) time.Duration {
+	delay := time.Minute << max(attempt-1, 0)
+	return min(delay, 15*time.Minute)
+}
+
+func automaticText(language localization.Language, reminderType domain.ReminderType) string {
+	localizer := localization.MustNew(language)
 	switch reminderType {
 	case domain.ReminderTypeBeforeCharge:
-		if !english {
-			return "Списание за подписку будет через 3 дня."
-		}
-		return "Your subscription charge is due in 3 days."
+		return localizer.Text("ReminderBefore", nil)
 	case domain.ReminderTypeChargeDebt:
-		if !english {
-			return "Подписка списана. Пополните баланс."
-		}
-		return "Your subscription charge was applied. Please top up your balance."
+		return localizer.Text("ReminderCharge", nil)
 	case domain.ReminderTypeOverdue3D:
-		if !english {
-			return "Долг сохраняется уже 3 дня. Пополните баланс."
-		}
-		return "Your balance has been overdue for 3 days. Please top up your balance."
+		return localizer.Text("ReminderOverdue3", nil)
 	case domain.ReminderTypeOverdue7D:
-		if !english {
-			return "Долг сохраняется уже 7 дней. Пополните баланс."
-		}
-		return "Your balance has been overdue for 7 days. Please top up your balance."
+		return localizer.Text("ReminderOverdue7", nil)
 	default:
-		if !english {
-			return "Пополните баланс."
-		}
-		return "Please top up your balance."
+		return localizer.Text("ReminderDefault", nil)
 	}
 }

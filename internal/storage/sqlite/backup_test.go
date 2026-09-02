@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -29,6 +30,22 @@ func TestBackupCreatesVerifiedSnapshot(t *testing.T) {
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Fatalf("backup permissions = %04o, want 0600", got)
+		}
+		directoryInfo, err := os.Stat(filepath.Dir(path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := directoryInfo.Mode().Perm(); got&0o077 != 0 {
+			t.Fatalf("backup directory permissions = %04o, want no group/other access", got)
+		}
 	}
 	if err := integrityCheckPath(ctx, path); err != nil {
 		t.Fatal(err)

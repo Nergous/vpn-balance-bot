@@ -22,5 +22,6 @@ type Storage interface {
 	CreateLedgerEntry(ctx context.Context, entry domain.LedgerEntry) (domain.LedgerEntry, error)
 	Balance(ctx context.Context, userID domain.UserID) (domain.AmountMinor, error)
 	LastLedgerEntries(ctx context.Context, userID domain.UserID, limit int) ([]domain.LedgerEntry, error)
+	LastUnreversedPayment(ctx context.Context, userID domain.UserID) (domain.LedgerEntry, bool, error)
 	ReverseLedgerEntry(ctx context.Context, record ReverseLedgerEntryRecord) (domain.LedgerEntry, error)
 }

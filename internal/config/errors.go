@@ -13,8 +13,10 @@ var (
 	ErrInvalidTimezone             = errors.New("timezone is invalid")
 	ErrInvalidReminderHour         = errors.New("reminder hour is invalid")
 	ErrInvalidInviteTTL            = errors.New("invite TTL is invalid")
+	ErrInvalidHTTPTimeout          = errors.New("HTTP_TIMEOUT must be positive")
+	ErrInvalidDBTimeout            = errors.New("DB_TIMEOUT must be positive")
 	ErrInvalidLogLevel             = errors.New("log level is invalid")
-	ErrInvalidBotLanguage          = errors.New("bot language must be ru or en")
+	ErrInvalidBotLanguage          = errors.New("bot language is unsupported")
 	ErrUnsafeProductionDatabase    = errors.New("production database path is unsafe")
 
 	ErrTelegramBotTokenRequired = errors.New("telegram bot token is required")

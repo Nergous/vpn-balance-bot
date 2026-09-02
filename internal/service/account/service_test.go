@@ -116,6 +116,46 @@ func TestListUsersRejectsInvalidStatus(t *testing.T) {
 	}
 }
 
+func TestBoundedAdminQueriesUseStorageCapabilities(t *testing.T) {
+	status := domain.UserStatusActive
+	storage := &fakeAdminQueryStorage{
+		fakeStorage: &fakeStorage{},
+		listPage: func(_ context.Context, gotStatus *domain.UserStatus, afterID domain.UserID, limit int) ([]domain.User, bool, error) {
+			if gotStatus == nil || *gotStatus != status || afterID != 7 || limit != 50 {
+				t.Fatalf("ListUsersPage args = %#v, %d, %d", gotStatus, afterID, limit)
+			}
+			return []domain.User{{ID: 8, Status: status}}, true, nil
+		},
+		statusCounts: func(context.Context) (UserStatusCounts, error) {
+			return UserStatusCounts{Total: 4, Active: 2, Paused: 1, Disabled: 1}, nil
+		},
+	}
+	service := newService(storage, time.Hour, time.Now)
+
+	users, hasMore, err := service.ListUsersPage(context.Background(), UserFilter{Status: &status}, 7, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(users) != 1 || users[0].ID != 8 || !hasMore || storage.pageCalls != 1 {
+		t.Fatalf("users=%#v hasMore=%v calls=%d", users, hasMore, storage.pageCalls)
+	}
+	counts, err := service.UserStatusCounts(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts != (UserStatusCounts{Total: 4, Active: 2, Paused: 1, Disabled: 1}) || storage.countCalls != 1 {
+		t.Fatalf("counts=%#v calls=%d", counts, storage.countCalls)
+	}
+}
+
+func TestListUsersPageRejectsInvalidLimit(t *testing.T) {
+	service := newService(&fakeStorage{}, time.Hour, time.Now)
+	_, _, err := service.ListUsersPage(context.Background(), UserFilter{}, 0, 0)
+	if !errors.Is(err, ErrInvalidUserPageLimit) {
+		t.Fatalf("ListUsersPage() error = %v, want %v", err, ErrInvalidUserPageLimit)
+	}
+}
+
 func TestServiceForwardsReadAndProfileCommands(t *testing.T) {
 	now := time.Date(2026, time.August, 28, 10, 0, 0, 0, time.UTC)
 	nextChargeOn := testDate(t, 2026, time.September, 17)
@@ -226,23 +266,42 @@ func TestServicePropagatesStorageErrors(t *testing.T) {
 }
 
 type fakeStorage struct {
-	createUserCalled   bool
-	createdUser        domain.User
-	createUser         func(context.Context, domain.User) (domain.User, error)
-	userByID           func(context.Context, domain.UserID) (domain.User, error)
-	listUsers          func(context.Context, *domain.UserStatus) ([]domain.User, error)
-	userByTelegramID   func(context.Context, int64) (domain.User, error)
-	setMonthlyFee      func(context.Context, domain.UserID, domain.AmountMinor, time.Time) (domain.User, error)
-	pauseUser          func(context.Context, domain.UserID, time.Time) (domain.User, error)
-	resumeUser         func(context.Context, domain.UserID, domain.Date, time.Time) (domain.User, error)
-	disableUser        func(context.Context, domain.UserID, time.Time) (domain.User, error)
-	createInviteToken  func(context.Context, CreateInviteTokenRecord) error
-	consumeInviteToken func(context.Context, ConsumeInviteTokenRecord) (domain.User, error)
-	createLedgerEntry  func(context.Context, domain.LedgerEntry) (domain.LedgerEntry, error)
-	balance            func(context.Context, domain.UserID) (domain.AmountMinor, error)
-	lastLedgerEntries  func(context.Context, domain.UserID, int) ([]domain.LedgerEntry, error)
-	reverseLedgerEntry func(context.Context, ReverseLedgerEntryRecord) (domain.LedgerEntry, error)
-	listUsersCalled    bool
+	createUserCalled      bool
+	createdUser           domain.User
+	createUser            func(context.Context, domain.User) (domain.User, error)
+	userByID              func(context.Context, domain.UserID) (domain.User, error)
+	listUsers             func(context.Context, *domain.UserStatus) ([]domain.User, error)
+	userByTelegramID      func(context.Context, int64) (domain.User, error)
+	setMonthlyFee         func(context.Context, domain.UserID, domain.AmountMinor, time.Time) (domain.User, error)
+	pauseUser             func(context.Context, domain.UserID, time.Time) (domain.User, error)
+	resumeUser            func(context.Context, domain.UserID, domain.Date, time.Time) (domain.User, error)
+	disableUser           func(context.Context, domain.UserID, time.Time) (domain.User, error)
+	createInviteToken     func(context.Context, CreateInviteTokenRecord) error
+	consumeInviteToken    func(context.Context, ConsumeInviteTokenRecord) (domain.User, error)
+	createLedgerEntry     func(context.Context, domain.LedgerEntry) (domain.LedgerEntry, error)
+	balance               func(context.Context, domain.UserID) (domain.AmountMinor, error)
+	lastLedgerEntries     func(context.Context, domain.UserID, int) ([]domain.LedgerEntry, error)
+	lastUnreversedPayment func(context.Context, domain.UserID) (domain.LedgerEntry, bool, error)
+	reverseLedgerEntry    func(context.Context, ReverseLedgerEntryRecord) (domain.LedgerEntry, error)
+	listUsersCalled       bool
+}
+
+type fakeAdminQueryStorage struct {
+	*fakeStorage
+	listPage     func(context.Context, *domain.UserStatus, domain.UserID, int) ([]domain.User, bool, error)
+	statusCounts func(context.Context) (UserStatusCounts, error)
+	pageCalls    int
+	countCalls   int
+}
+
+func (f *fakeAdminQueryStorage) ListUsersPage(ctx context.Context, status *domain.UserStatus, afterID domain.UserID, limit int) ([]domain.User, bool, error) {
+	f.pageCalls++
+	return f.listPage(ctx, status, afterID, limit)
+}
+
+func (f *fakeAdminQueryStorage) UserStatusCounts(ctx context.Context) (UserStatusCounts, error) {
+	f.countCalls++
+	return f.statusCounts(ctx)
 }
 
 func (f *fakeStorage) CreateUser(ctx context.Context, user domain.User) (domain.User, error) {
@@ -337,6 +396,13 @@ func (f *fakeStorage) LastLedgerEntries(ctx context.Context, userID domain.UserI
 		return nil, errors.New("unexpected LastLedgerEntries call")
 	}
 	return f.lastLedgerEntries(ctx, userID, limit)
+}
+
+func (f *fakeStorage) LastUnreversedPayment(ctx context.Context, userID domain.UserID) (domain.LedgerEntry, bool, error) {
+	if f.lastUnreversedPayment == nil {
+		return domain.LedgerEntry{}, false, errors.New("unexpected LastUnreversedPayment call")
+	}
+	return f.lastUnreversedPayment(ctx, userID)
 }
 
 func (f *fakeStorage) ReverseLedgerEntry(ctx context.Context, record ReverseLedgerEntryRecord) (domain.LedgerEntry, error) {

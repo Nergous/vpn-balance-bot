@@ -4,14 +4,17 @@
 
 -- Stores each customer's billing profile and optional Telegram account binding.
 CREATE TABLE IF NOT EXISTS users (
+  -- Internal immutable identifier. Telegram identifiers remain nullable until invite binding.
   id INTEGER PRIMARY KEY,
   telegram_user_id INTEGER UNIQUE,
   telegram_chat_id INTEGER UNIQUE,
   username TEXT,
   display_name TEXT NOT NULL CHECK (length(trim(display_name)) > 0),
+  -- Money is always stored as signed integer minor units, never floating point.
   monthly_fee_minor INTEGER NOT NULL CHECK (monthly_fee_minor > 0),
   currency TEXT NOT NULL DEFAULT 'RUB' CHECK (currency = 'RUB'),
   billing_anchor_day INTEGER NOT NULL CHECK (billing_anchor_day BETWEEN 1 AND 31),
+  -- Next subscription billing date in ISO 8601 YYYY-MM-DD format.
   next_charge_on TEXT NOT NULL,
   status TEXT NOT NULL CHECK (status IN ('active', 'paused', 'disabled')),
   created_at INTEGER NOT NULL,
@@ -20,6 +23,7 @@ CREATE TABLE IF NOT EXISTS users (
 
 -- Stores hashed, single-use invitation tokens that bind a Telegram account to a customer.
 CREATE TABLE IF NOT EXISTS invite_tokens (
+  -- Only a hash is persisted; raw tokens are returned once to the administrator.
   token_hash TEXT PRIMARY KEY NOT NULL CHECK (length(token_hash) > 0),
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
   expires_at INTEGER NOT NULL,
@@ -38,7 +42,9 @@ CREATE TABLE IF NOT EXISTS ledger_entries (
   ),
   amount_minor INTEGER NOT NULL CHECK (amount_minor <> 0),
   occurred_at INTEGER NOT NULL,
+  -- Billing period charged by a subscription entry; not used by manual entries.
   billing_period_on TEXT,
+  -- A reversal points to exactly one original entry and is itself immutable.
   reverses_entry_id INTEGER UNIQUE REFERENCES ledger_entries(id) ON DELETE RESTRICT,
   created_by_telegram_id INTEGER,
   note TEXT,
@@ -60,6 +66,8 @@ CREATE TABLE IF NOT EXISTS reminder_deliveries (
   status TEXT NOT NULL CHECK (status IN ('pending', 'sent', 'failed', 'skipped')),
   sent_at INTEGER,
   telegram_message_id INTEGER,
+  -- Safe transport classification such as unreachable or delivery_state_unknown.
+  -- Never persist raw Telegram API error text here.
   error_code TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,

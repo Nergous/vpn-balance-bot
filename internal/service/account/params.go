@@ -23,6 +23,14 @@ type UserFilter struct {
 	Status *domain.UserStatus
 }
 
+// UserStatusCounts contains aggregate profile counts for the admin dashboard.
+type UserStatusCounts struct {
+	Total    int
+	Active   int
+	Paused   int
+	Disabled int
+}
+
 // ChangeMonthlyFeeParams contains a profile-only tariff change.
 type ChangeMonthlyFeeParams struct {
 	UserID          domain.UserID

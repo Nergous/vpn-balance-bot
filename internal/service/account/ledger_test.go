@@ -3,6 +3,7 @@ package account
 import (
 	"context"
 	"errors"
+	"math"
 	"testing"
 	"time"
 
@@ -55,6 +56,70 @@ func TestManualLedgerOperationsBuildEntries(t *testing.T) {
 		if entry.CreatedByTelegramID == nil || *entry.CreatedByTelegramID != 7 || !entry.OccurredAt.Equal(now) || !entry.CreatedAt.Equal(now) {
 			t.Fatalf("entry audit fields = %#v", entry)
 		}
+	}
+}
+
+func TestSignedManualLedgerOperationsRejectMinInt64BeforeStorage(t *testing.T) {
+	storageCalled := false
+	storage := &fakeStorage{
+		createLedgerEntry: func(_ context.Context, entry domain.LedgerEntry) (domain.LedgerEntry, error) {
+			storageCalled = true
+			return entry, nil
+		},
+	}
+	service := newService(storage, time.Hour, time.Now)
+
+	tests := []struct {
+		name string
+		call func() error
+	}{
+		{
+			name: "opening balance",
+			call: func() error {
+				_, err := service.AddOpeningBalance(context.Background(), AddOpeningBalanceParams{
+					UserID: 1, AmountMinor: domain.AmountMinor(math.MinInt64), AdminTelegramID: 7,
+				})
+				return err
+			},
+		},
+		{
+			name: "adjustment",
+			call: func() error {
+				_, err := service.AddAdjustment(context.Background(), AddAdjustmentParams{
+					UserID: 1, AmountMinor: domain.AmountMinor(math.MinInt64), AdminTelegramID: 7, Note: "correction",
+				})
+				return err
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			storageCalled = false
+			if err := test.call(); !errors.Is(err, domain.ErrAmountOverflow) {
+				t.Fatalf("error = %v, want %v", err, domain.ErrAmountOverflow)
+			}
+			if storageCalled {
+				t.Fatal("storage called after MinInt64 validation failure")
+			}
+		})
+	}
+}
+
+func TestLastUnreversedPaymentForwardsExactContract(t *testing.T) {
+	want := domain.LedgerEntry{ID: 12, UserID: 7, Kind: domain.LedgerKindPayment}
+	storage := &fakeStorage{
+		lastUnreversedPayment: func(_ context.Context, userID domain.UserID) (domain.LedgerEntry, bool, error) {
+			if userID != 7 {
+				t.Fatalf("LastUnreversedPayment userID = %d, want 7", userID)
+			}
+			return want, true, nil
+		},
+	}
+
+	got, found, err := newService(storage, time.Hour, time.Now).LastUnreversedPayment(context.Background(), 7)
+	if err != nil || !found || got != want {
+		t.Fatalf("LastUnreversedPayment() = %#v, %t, %v; want %#v, true, nil", got, found, err, want)
 	}
 }
 

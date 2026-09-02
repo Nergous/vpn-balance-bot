@@ -13,6 +13,7 @@ const insertMigration = `
 	VALUES (?, ?)
 `
 
+// Migrate creates the migration registry and applies each unapplied version once.
 func (s *Store) Migrate(ctx context.Context) error {
 	migrateCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
@@ -34,6 +35,7 @@ func (s *Store) applyMigrations(ctx context.Context, all []migrations.Migration,
 	return nil
 }
 
+// applyMigration runs migration SQL and records its version in one transaction.
 func (s *Store) applyMigration(ctx context.Context, migration migrations.Migration, appliedAt int64) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -49,6 +51,7 @@ func (s *Store) applyMigration(ctx context.Context, migration migrations.Migrati
 	`, migration.Version).Scan(&applied); err != nil {
 		return err
 	}
+
 	if applied {
 		return nil
 	}

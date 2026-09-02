@@ -304,7 +304,7 @@ func TestUsersDueForChargeIgnoresFutureDate(t *testing.T) {
 	now := time.Now().UTC()
 	future := billingDate(t, 2026, time.December, 1)
 	createBillingUser(t, store, ctx, 1, 100000, 1, future, domain.UserStatusActive, now)
-	users, err := store.UsersDueForCharge(ctx, billingDate(t, 2026, time.November, 30))
+	users, err := store.UsersDueForCharge(ctx, billingDate(t, 2026, time.November, 30), 100)
 	if err != nil || len(users) != 0 {
 		t.Fatalf("UsersDueForCharge() = %#v, %v", users, err)
 	}
