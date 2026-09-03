@@ -7,7 +7,8 @@ COMPOSE ?= docker compose
 
 .DEFAULT_GOAL := help
 
-.PHONY: help fmt fmt-check tidy-check test test-race vet build verify \
+.PHONY: help fmt fmt-check tidy-check test test-race vet build verify version \
+	doctor migrate-status \
 	docker-build docker-test compose-config compose-up compose-down compose-logs
 
 help:
@@ -15,6 +16,9 @@ help:
 		'make fmt             Format Go source' \
 		'make verify          Run repository verification' \
 		'make build           Build bin/$(APP)' \
+		'make version         Show build information' \
+		'make doctor          Check the configured database' \
+		'make migrate-status  Show applied and pending migrations' \
 		'make docker-build    Build the runtime image' \
 		'make docker-test     Run tests in the Docker build stage' \
 		'make compose-up      Build and start the bot' \
@@ -42,6 +46,15 @@ vet:
 build:
 	mkdir -p bin
 	$(GO) build -trimpath -o bin/$(APP) $(PACKAGE)
+
+version:
+	$(GO) run $(PACKAGE) version
+
+doctor:
+	$(GO) run $(PACKAGE) doctor
+
+migrate-status:
+	$(GO) run $(PACKAGE) migrate-status
 
 verify: fmt-check tidy-check vet test test-race
 

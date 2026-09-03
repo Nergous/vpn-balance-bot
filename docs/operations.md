@@ -36,6 +36,10 @@ docker compose ps
 docker compose logs --tail 100 bot
 ```
 
+After startup, `docker compose ps` should report the service as healthy. The
+healthcheck runs `vpn-balance-bot doctor` against the existing database without
+contacting Telegram or applying migrations.
+
 The service publishes no ports. It only makes outbound HTTPS requests to the
 Telegram Bot API.
 
@@ -98,6 +102,17 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now vpn-balance-bot.service
 sudo systemctl status vpn-balance-bot.service
 sudo journalctl -u vpn-balance-bot.service -n 100 --no-pager
+```
+
+Run a local database health check under the service account:
+
+```bash
+sudo -u vpn-balance-bot /usr/bin/env \
+  APP_ENV=production \
+  DATABASE_PATH=/var/lib/vpn-balance-bot/vpn-balance-bot.db \
+  DB_TIMEOUT=30s \
+  LOG_LEVEL=info \
+  /opt/vpn-balance-bot/vpn-balance-bot doctor
 ```
 
 The unit runs as an unprivileged account with a strict filesystem sandbox,

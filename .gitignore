@@ -18,6 +18,7 @@ dist/
 *.exe
 coverage.out
 coverage.html
+.audit-cache/
 
 # Editor and OS files
 .idea/

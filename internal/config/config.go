@@ -65,6 +65,16 @@ func Load(ctx context.Context) (*Config, error) {
 // LoadForMaintenance reads only database and logging settings. It does not
 // require Telegram credentials or contact external services.
 func LoadForMaintenance(_ context.Context) (*Config, error) {
+	return loadMaintenanceConfig("", true)
+}
+
+// LoadForInspection reads logging and database timeout settings for an explicit
+// database path. It does not require Telegram credentials or contact services.
+func LoadForInspection(_ context.Context, databasePath string) (*Config, error) {
+	return loadMaintenanceConfig(databasePath, false)
+}
+
+func loadMaintenanceConfig(databasePath string, enforceProductionPath bool) (*Config, error) {
 	appEnv, err := parseAppEnv(os.Getenv("APP_ENV"))
 	if err != nil {
 		return nil, err
@@ -81,12 +91,15 @@ func LoadForMaintenance(_ context.Context) (*Config, error) {
 		return nil, err
 	}
 	cfg := &Config{
-		DatabasePath: strings.TrimSpace(os.Getenv("DATABASE_PATH")),
+		DatabasePath: strings.TrimSpace(databasePath),
 		DBTimeout:    dbTimeout,
 		LogLevel:     strings.ToUpper(optionalString("LOG_LEVEL", InfoLevel)),
 		AppEnv:       appEnv,
 	}
-	if err := validateMaintenanceConfig(cfg); err != nil {
+	if cfg.DatabasePath == "" {
+		cfg.DatabasePath = strings.TrimSpace(os.Getenv("DATABASE_PATH"))
+	}
+	if err := validateMaintenanceConfig(cfg, enforceProductionPath); err != nil {
 		return nil, err
 	}
 	return cfg, nil
@@ -122,7 +135,7 @@ func load(ctx context.Context, validateToken bool) (*Config, error) {
 	return cfg, nil
 }
 
-func validateMaintenanceConfig(cfg *Config) error {
+func validateMaintenanceConfig(cfg *Config, enforceProductionPath bool) error {
 	var errs []error
 	if cfg.DatabasePath == "" {
 		errs = append(errs, ErrDatabasePathRequired)
@@ -133,7 +146,8 @@ func validateMaintenanceConfig(cfg *Config) error {
 	if !validLogLevel(cfg.LogLevel) {
 		errs = append(errs, fmt.Errorf("%w: %q", ErrInvalidLogLevel, cfg.LogLevel))
 	}
-	if cfg.AppEnv == EnvProduction && isUnsafeProductionDatabasePath(cfg.DatabasePath) {
+	if enforceProductionPath && cfg.AppEnv == EnvProduction &&
+		isUnsafeProductionDatabasePath(cfg.DatabasePath) {
 		errs = append(errs, ErrUnsafeProductionDatabase)
 	}
 	return errors.Join(errs...)

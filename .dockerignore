@@ -1,6 +1,7 @@
 .git
 .github
 .workflow
+.audit-cache
 .idea
 .vscode
 

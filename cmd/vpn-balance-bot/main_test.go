@@ -45,6 +45,63 @@ func TestRunBackupCommand(t *testing.T) {
 	}
 }
 
+func TestRunVersionCommand(t *testing.T) {
+	oldVersion, oldCommit, oldBuildDate := version, commit, buildDate
+	version, commit, buildDate = "v1.2.3", "abc123", "2026-09-03T12:00:00Z"
+	t.Cleanup(func() {
+		version, commit, buildDate = oldVersion, oldCommit, oldBuildDate
+	})
+
+	var output bytes.Buffer
+	if err := run(context.Background(), []string{"version"}, &output); err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		"vpn-balance-bot v1.2.3",
+		"commit: abc123",
+		"built: 2026-09-03T12:00:00Z",
+		"go:",
+		"platform:",
+	} {
+		if !strings.Contains(output.String(), expected) {
+			t.Errorf("version output missing %q: %s", expected, output.String())
+		}
+	}
+}
+
+func TestRunDatabaseInspectionCommands(t *testing.T) {
+	ctx := context.Background()
+	source := filepath.Join(t.TempDir(), "source.db")
+	store, err := sqlite.New(ctx, source, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("APP_ENV", "test")
+	t.Setenv("DATABASE_PATH", source)
+	t.Setenv("DB_TIMEOUT", "5s")
+
+	for _, command := range [][]string{
+		{"doctor"},
+		{"migrate-status"},
+		{"verify-backup", source},
+	} {
+		var output bytes.Buffer
+		if err := run(ctx, command, &output); err != nil {
+			t.Fatalf("run(%v) error = %v", command, err)
+		}
+		if !strings.Contains(output.String(), "migrations: current") {
+			t.Errorf("run(%v) output = %s", command, output.String())
+		}
+	}
+}
+
 func TestRunRejectsInvalidCommand(t *testing.T) {
 	if err := run(context.Background(), []string{"unknown"}, io.Discard); err == nil {
 		t.Fatal("run() accepted an unknown command")

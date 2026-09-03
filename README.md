@@ -163,6 +163,18 @@ DATABASE_PATH=/var/lib/vpn-balance-bot/vpn-balance-bot.db \
 
 Never copy only the live `.db` file while SQLite WAL is active.
 
+Maintenance and diagnostics:
+
+```bash
+./vpn-balance-bot version
+./vpn-balance-bot doctor
+./vpn-balance-bot migrate-status
+./vpn-balance-bot verify-backup /var/backups/vpn-balance-bot/backup.db
+```
+
+`doctor`, `migrate-status`, and `verify-backup` open existing databases
+read-only. They never apply migrations, create a database, or contact Telegram.
+
 ## Development
 
 ```bash

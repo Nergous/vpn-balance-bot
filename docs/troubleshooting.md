@@ -21,6 +21,13 @@ If the container restarts immediately, inspect logs before running it again.
 Typical causes are invalid configuration, rejected Telegram credentials, an
 unsafe production database path, or migration incompatibility.
 
+Run the offline database checks directly:
+
+```bash
+docker compose exec bot /usr/local/bin/vpn-balance-bot doctor
+docker compose exec bot /usr/local/bin/vpn-balance-bot migrate-status
+```
+
 ## systemd service
 
 ```bash

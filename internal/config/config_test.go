@@ -77,6 +77,26 @@ func TestLoadForMaintenanceSkipsTelegramNetworkValidation(t *testing.T) {
 	}
 }
 
+func TestLoadForInspectionUsesExplicitPathWithoutTelegramSettings(t *testing.T) {
+	clearConfigEnvironment(t)
+	t.Setenv("APP_ENV", EnvProduction)
+	t.Setenv("DB_TIMEOUT", "7s")
+	setTelegramRoundTripper(t, func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("Telegram must not be contacted")
+	})
+
+	cfg, err := LoadForInspection(context.Background(), "/backups/test-snapshot.db")
+	if err != nil {
+		t.Fatalf("LoadForInspection() error = %v", err)
+	}
+	if cfg.DatabasePath != "/backups/test-snapshot.db" ||
+		cfg.DBTimeout != 7*time.Second ||
+		cfg.TelegramBotToken != "" ||
+		cfg.AdminTelegramID != 0 {
+		t.Fatalf("inspection config = %+v", cfg)
+	}
+}
+
 func TestLoadErrors(t *testing.T) {
 	t.Setenv("APP_ENV", "staging")
 	if _, err := Load(context.Background()); !errors.Is(err, ErrInvalidAppEnv) {

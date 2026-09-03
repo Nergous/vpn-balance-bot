@@ -56,4 +56,7 @@ USER 65532:65532
 WORKDIR /data
 VOLUME ["/data"]
 
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD ["/usr/local/bin/vpn-balance-bot", "doctor"]
+
 ENTRYPOINT ["/usr/local/bin/vpn-balance-bot"]

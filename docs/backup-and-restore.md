@@ -32,6 +32,14 @@ sha256sum "backups/vpn-balance-bot-$STAMP.db" \
 
 Copy the snapshot and checksum to storage outside the Docker host.
 
+Verify any copied snapshot without the live database:
+
+```bash
+docker compose run --rm --no-deps \
+  -v "$PWD/backups:/backups:ro" \
+  bot verify-backup "/backups/vpn-balance-bot-$STAMP.db"
+```
+
 ## Backup with systemd
 
 ```bash
@@ -47,6 +55,13 @@ sudo -u vpn-balance-bot /usr/bin/env \
   "/var/backups/vpn-balance-bot/vpn-balance-bot-$STAMP.db"
 sha256sum "/var/backups/vpn-balance-bot/vpn-balance-bot-$STAMP.db" \
   | sudo tee "/var/backups/vpn-balance-bot/vpn-balance-bot-$STAMP.db.sha256"
+
+sudo -u vpn-balance-bot /usr/bin/env \
+  APP_ENV=production \
+  DB_TIMEOUT=30s \
+  LOG_LEVEL=info \
+  /opt/vpn-balance-bot/vpn-balance-bot verify-backup \
+  "/var/backups/vpn-balance-bot/vpn-balance-bot-$STAMP.db"
 ```
 
 ## Backup retention

@@ -19,6 +19,7 @@ type Store struct {
 }
 
 const dsn = "file:%s?mode=rwc&_foreign_keys=1&_journal=WAL&_busy_timeout=5000"
+const readOnlyDSN = "file:%s?mode=ro&_foreign_keys=1&_busy_timeout=5000"
 
 // New opens SQLite, enables required PRAGMAs, and verifies connectivity.
 func New(ctx context.Context, dbPath string, dbTimeout time.Duration) (*Store, error) {
@@ -50,6 +51,41 @@ func New(ctx context.Context, dbPath string, dbTimeout time.Duration) (*Store, e
 			_ = conn.Close()
 			return nil, fmt.Errorf("%w: secure database permissions: %w", ErrOpenConnection, err)
 		}
+	}
+
+	return &Store{db: conn, timeout: dbTimeout}, nil
+}
+
+// OpenReadOnly opens an existing SQLite database without creating files,
+// changing permissions, applying migrations, or allowing writes.
+func OpenReadOnly(ctx context.Context, dbPath string, dbTimeout time.Duration) (*Store, error) {
+	info, err := os.Stat(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("%w: stat database: %w", ErrOpenConnection, err)
+	}
+	if info.IsDir() {
+		return nil, fmt.Errorf("%w: database path is a directory", ErrOpenConnection)
+	}
+
+	conn, err := sql.Open(
+		"sqlite",
+		fmt.Sprintf(readOnlyDSN, filepath.ToSlash(dbPath)),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrOpenConnection, err)
+	}
+	conn.SetMaxOpenConns(1)
+	conn.SetMaxIdleConns(1)
+
+	pingCtx, cancel := context.WithTimeout(ctx, dbTimeout)
+	defer cancel()
+	if err := conn.PingContext(pingCtx); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("%w: %w", ErrOpenConnection, err)
+	}
+	if _, err := conn.ExecContext(pingCtx, "PRAGMA query_only = ON"); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("%w: enable query-only mode: %w", ErrOpenConnection, err)
 	}
 
 	return &Store{db: conn, timeout: dbTimeout}, nil
