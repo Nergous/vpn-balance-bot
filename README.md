@@ -1,5 +1,7 @@
 # VPN Balance Bot
 
+![VPN Balance Bot — Telegram, SQLite, Self-hosted](assets/social-preview.png)
+
 [![Go CI](https://github.com/Nergous/vpn-balance-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/Nergous/vpn-balance-bot/actions/workflows/ci.yml)
 [![Go version](https://img.shields.io/github/go-mod/go-version/Nergous/vpn-balance-bot)](go.mod)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
