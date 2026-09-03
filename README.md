@@ -24,8 +24,9 @@ profiles, one application process, and one SQLite database.
 
 ## Quick start
 
-Requirements: the Go version declared in [`go.mod`](go.mod), a bot token from
-BotFather, and the numeric Telegram ID of the administrator.
+Requirements: Docker with Compose, or the Go version declared in
+[`go.mod`](go.mod), plus a bot token from BotFather and the numeric Telegram ID
+of the administrator.
 
 ```bash
 git clone https://github.com/Nergous/vpn-balance-bot.git
@@ -41,7 +42,26 @@ ADMIN_TELEGRAM_ID=123456789
 DATABASE_PATH=./data/vpn-balance-bot.db
 ```
 
-Start the bot:
+### Docker Compose
+
+```bash
+docker compose up -d --build
+docker compose logs -f bot
+```
+
+Compose forces `APP_ENV=production`, stores SQLite in the
+`vpn-balance-data` named volume, uses a read-only root filesystem, drops Linux
+capabilities, and publishes no network ports.
+
+Stop the service without deleting its database volume:
+
+```bash
+docker compose down
+```
+
+### Local Go process
+
+Start without Docker:
 
 ```bash
 go run ./cmd/vpn-balance-bot
@@ -50,6 +70,8 @@ go run ./cmd/vpn-balance-bot
 The application creates the database directory, opens SQLite in WAL mode,
 applies embedded migrations, validates the Telegram token, and starts long
 polling. Stop it with `Ctrl+C`.
+
+Run `make help` for the common development and container commands.
 
 ## Telegram commands
 
@@ -160,6 +182,7 @@ Telegram API.
 
 - [Production operations](docs/operations.md)
 - [systemd service](deploy/vpn-balance-bot.service)
+- [Docker Compose](compose.yml)
 - [Architecture](docs/architecture.md)
 - [Database design](docs/database.md)
 
@@ -181,14 +204,17 @@ internal/testutil/         isolated test fakes and helpers
 migrations/                embedded additive SQL migrations
 deploy/                    service-manager templates
 docs/                      architecture and operations documentation
+Dockerfile                 minimal non-root runtime image
+compose.yml                single-service SQLite deployment
+Makefile                   development and container commands
 ```
 
 ## Status
 
 Core bot behavior, persistence, migrations, backups, tests, and systemd deployment
-are implemented. Container packaging, automated release artifacts, repository
-community files, and an isolated host-level acceptance drill remain before the
-first stable release.
+are implemented. Local container packaging is also available. Automated release
+artifacts, repository community files, and an isolated host-level acceptance
+drill remain before the first stable release.
 
 ## License
 

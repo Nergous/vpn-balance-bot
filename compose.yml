@@ -1,0 +1,40 @@
+name: vpn-balance-bot
+
+services:
+  bot:
+    build:
+      context: .
+      target: runtime
+      args:
+        GO_VERSION: ${GO_VERSION:-1.26.7}
+        VERSION: ${VERSION:-dev}
+        VCS_REF: ${VCS_REF:-local}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
+    image: ${VPN_BALANCE_BOT_IMAGE:-vpn-balance-bot:local}
+    env_file:
+      - .env
+    environment:
+      APP_ENV: production
+      DATABASE_PATH: /data/vpn-balance-bot.db
+      HOME: /tmp
+    volumes:
+      - vpn-balance-data:/data
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 100
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  vpn-balance-data:
