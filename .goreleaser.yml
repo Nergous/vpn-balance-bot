@@ -1,0 +1,89 @@
+version: 2
+
+project_name: vpn-balance-bot
+
+before:
+  hooks:
+    - go mod tidy -diff
+    - go test ./...
+
+builds:
+  - id: vpn-balance-bot
+    main: ./cmd/vpn-balance-bot
+    binary: vpn-balance-bot
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - >-
+        -s -w
+        -X main.version={{ .Version }}
+        -X main.commit={{ .Commit }}
+        -X main.buildDate={{ .CommitDate }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: release
+    ids:
+      - vpn-balance-bot
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - LICENSE
+      - README.md
+      - CHANGELOG.md
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+source:
+  enabled: true
+  name_template: "{{ .ProjectName }}_{{ .Version }}_source"
+  format: tar.gz
+  prefix_template: "{{ .ProjectName }}_{{ .Version }}/"
+
+sboms:
+  - id: archives
+    artifacts: archive
+  - id: source
+    artifacts: source
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^chore:"
+      - "^ci:"
+      - "^docs:"
+      - "^style:"
+      - "^test:"
+      - "^Merge"
+
+release:
+  github:
+    owner: Nergous
+    name: vpn-balance-bot
+  draft: true
+  replace_existing_draft: true
+  prerelease: auto
+  make_latest: true
+  mode: replace
+  header: |
+    ## VPN Balance Bot {{ .Version }}
+
+    See `CHANGELOG.md` for the maintained project history.

@@ -203,6 +203,22 @@ Telegram API.
 A real-credential acceptance run must use a dedicated test bot and isolated test
 database before any production token or production data is introduced.
 
+## Releases
+
+Pushing a stable semantic-version tag such as `v1.2.3` creates a GitHub Release
+and publishes `linux/amd64` and `linux/arm64` images to GHCR. The release
+contains Linux, macOS, and Windows archives for `amd64` and `arm64`, SHA-256
+checksums, source and archive SBOMs, and signed build provenance.
+
+```bash
+docker pull ghcr.io/nergous/vpn-balance-bot:1.2.3
+gh attestation verify vpn-balance-bot_1.2.3_linux_amd64.tar.gz \
+  --repo Nergous/vpn-balance-bot
+```
+
+See [CHANGELOG.md](CHANGELOG.md) for maintained release history. Release tags
+must match `vMAJOR.MINOR.PATCH`.
+
 ## Repository structure
 
 ```text
@@ -225,10 +241,9 @@ Makefile                   development and container commands
 
 ## Status
 
-Core bot behavior, persistence, migrations, backups, tests, and systemd deployment
-are implemented. Local container packaging is also available. Automated release
-artifacts, repository community files, and an isolated host-level acceptance
-drill remain before the first stable release.
+Core bot behavior, persistence, migrations, backups, tests, deployments, and
+release automation are implemented. Repository community files and an isolated
+host-level acceptance drill remain before the first stable release.
 
 ## License
 
