@@ -1,7 +1,9 @@
 package migrations
 
 import (
+	"crypto/sha256"
 	_ "embed"
+	"fmt"
 	"sort"
 )
 
@@ -22,6 +24,10 @@ var migrations = []Migration{
 		Version: "002_reminder_delivery_retries.sql",
 		SQL:     reminderDeliveryRetriesSQL,
 	},
+	{
+		Version: "003_runtime_hardening.sql",
+		SQL:     runtimeHardeningSQL,
+	},
 }
 
 //go:embed 001_initial.sql
@@ -29,6 +35,13 @@ var initialSQL string
 
 //go:embed 002_reminder_delivery_retries.sql
 var reminderDeliveryRetriesSQL string
+
+//go:embed 003_runtime_hardening.sql
+var runtimeHardeningSQL string
+
+func (m Migration) Checksum() string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(m.SQL)))
+}
 
 func All() []Migration {
 	ret := make([]Migration, len(migrations))

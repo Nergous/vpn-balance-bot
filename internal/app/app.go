@@ -88,6 +88,11 @@ func (a *App) Run(ctx context.Context) error {
 	if err := bot.EnableAdmin(a.cfg.AdminTelegramID, reminderService); err != nil {
 		return fmt.Errorf("enable Telegram admin handlers: %w", err)
 	}
+	if recovered, err := reminderService.RecoverPending(ctx); err != nil {
+		return fmt.Errorf("recover expired reminder deliveries: %w", err)
+	} else if recovered > 0 {
+		a.logger.Warn("recovered expired reminder deliveries", slog.Int("count", recovered))
+	}
 	scheduled, err := a.newScheduler(billingService, reminderService, location, a.cfg.ReminderHour, a.schedulerObserver())
 	if err != nil {
 		return fmt.Errorf("create scheduler: %w", err)

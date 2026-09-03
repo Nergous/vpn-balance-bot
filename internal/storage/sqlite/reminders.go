@@ -12,10 +12,10 @@ import (
 
 const reserveReminderDelivery = `
 	INSERT INTO reminder_deliveries (
-		user_id, billing_date, reminder_type, scheduled_date, status,
-		created_at, updated_at, attempt_count, next_attempt_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, 1, NULL)
-	ON CONFLICT(user_id, billing_date, reminder_type) DO UPDATE SET
+		user_id, billing_date, reminder_type, delivery_key, scheduled_date, status,
+		created_at, updated_at, attempt_count, next_attempt_at, lease_expires_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, ?)
+	ON CONFLICT(user_id, billing_date, reminder_type, delivery_key) DO UPDATE SET
 		scheduled_date = excluded.scheduled_date,
 		status = excluded.status,
 		sent_at = NULL,
@@ -23,7 +23,8 @@ const reserveReminderDelivery = `
 		error_code = NULL,
 		updated_at = excluded.updated_at,
 		attempt_count = reminder_deliveries.attempt_count + 1,
-		next_attempt_at = NULL
+		next_attempt_at = NULL,
+		lease_expires_at = excluded.lease_expires_at
 	WHERE reminder_deliveries.status = 'failed'
 		AND reminder_deliveries.error_code = 'delivery_retryable'
 		AND reminder_deliveries.attempt_count < ?
@@ -37,14 +38,21 @@ func (s *Store) ReserveReminderDelivery(ctx context.Context, delivery domain.Rem
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
-	result, err := s.db.ExecContext(ctx, reserveReminderDelivery,
+	if delivery.LeaseExpiresAt == nil {
+		lease := delivery.UpdatedAt.Add(2 * time.Minute)
+		delivery.LeaseExpiresAt = &lease
+	}
+	runner := s.runner(ctx)
+	result, err := runner.ExecContext(ctx, reserveReminderDelivery,
 		delivery.UserID,
 		delivery.BillingDate.String(),
 		delivery.ReminderType,
+		delivery.DeliveryKey,
 		delivery.ScheduledDate.String(),
 		delivery.Status,
 		delivery.CreatedAt.UTC().Unix(),
 		delivery.UpdatedAt.UTC().Unix(),
+		delivery.LeaseExpiresAt.UTC().Unix(),
 		maxAttempts,
 	)
 	if err != nil {
@@ -56,7 +64,7 @@ func (s *Store) ReserveReminderDelivery(ctx context.Context, delivery domain.Rem
 		return domain.ReminderDelivery{}, 0, false, fmt.Errorf("check reminder reservation: %w", err)
 	}
 
-	existing, attempt, err := s.reminderDeliveryAttempt(ctx, delivery.UserID, delivery.BillingDate, delivery.ReminderType)
+	existing, attempt, err := s.reminderDeliveryAttempt(ctx, delivery.UserID, delivery.BillingDate, delivery.ReminderType, delivery.DeliveryKey)
 	if err != nil {
 		return domain.ReminderDelivery{}, 0, false, err
 	}
@@ -71,14 +79,14 @@ func (s *Store) CreateReminderDelivery(ctx context.Context, delivery domain.Remi
 	return existing, created, err
 }
 
-const updateReminderDelivery = "UPDATE reminder_deliveries SET status = ?, sent_at = ?, telegram_message_id = ?, error_code = ?, updated_at = ?, next_attempt_at = ? WHERE user_id = ? AND billing_date = ? AND reminder_type = ?"
+const updateReminderDelivery = "UPDATE reminder_deliveries SET status = ?, sent_at = ?, telegram_message_id = ?, error_code = ?, updated_at = ?, next_attempt_at = ?, lease_expires_at = NULL WHERE user_id = ? AND billing_date = ? AND reminder_type = ? AND delivery_key = ? AND status = 'pending' AND attempt_count = ?"
 
 // UpdateReminderDeliveryAttempt records one transport result and optional retry time.
-func (s *Store) UpdateReminderDeliveryAttempt(ctx context.Context, delivery domain.ReminderDelivery, retryAt *time.Time) error {
+func (s *Store) UpdateReminderDeliveryAttempt(ctx context.Context, delivery domain.ReminderDelivery, attempt int, retryAt *time.Time) (bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
-	_, err := s.db.ExecContext(ctx, updateReminderDelivery,
+	result, err := s.runner(ctx).ExecContext(ctx, updateReminderDelivery,
 		delivery.Status,
 		unixOrNil(delivery.SentAt),
 		int64OrNil(delivery.TelegramMessageID),
@@ -88,27 +96,67 @@ func (s *Store) UpdateReminderDeliveryAttempt(ctx context.Context, delivery doma
 		delivery.UserID,
 		delivery.BillingDate.String(),
 		delivery.ReminderType,
+		delivery.DeliveryKey,
+		attempt,
 	)
 
 	if err != nil {
-		return fmt.Errorf("update reminder delivery: %w", err)
+		return false, fmt.Errorf("update reminder delivery: %w", err)
 	}
-	return nil
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("check reminder delivery update: %w", err)
+	}
+	return rows == 1, nil
 }
 
 // UpdateReminderDelivery records the final transport outcome of a reserved delivery.
 func (s *Store) UpdateReminderDelivery(ctx context.Context, delivery domain.ReminderDelivery) error {
-	return s.UpdateReminderDeliveryAttempt(ctx, delivery, nil)
+	attempt := delivery.AttemptCount
+	if attempt == 0 {
+		_, current, err := s.reminderDeliveryAttempt(ctx, delivery.UserID, delivery.BillingDate, delivery.ReminderType, delivery.DeliveryKey)
+		if err != nil {
+			return err
+		}
+		attempt = current
+	}
+	updated, err := s.UpdateReminderDeliveryAttempt(ctx, delivery, attempt, nil)
+	if err != nil {
+		return err
+	}
+	if !updated {
+		return fmt.Errorf("update reminder delivery: stale attempt")
+	}
+	return nil
 }
 
-const markPendingUnknown = "UPDATE reminder_deliveries SET status = 'failed', error_code = 'delivery_state_unknown', next_attempt_at = NULL, updated_at = ? WHERE status = 'pending'"
+const markPendingUnknown = "UPDATE reminder_deliveries SET status = 'failed', error_code = 'delivery_state_unknown', next_attempt_at = NULL, lease_expires_at = NULL, updated_at = ? WHERE status = 'pending' AND lease_expires_at <= ?"
+const markAllPendingUnknown = "UPDATE reminder_deliveries SET status = 'failed', error_code = 'delivery_state_unknown', next_attempt_at = NULL, lease_expires_at = NULL, updated_at = ? WHERE status = 'pending'"
 
-// MarkPendingUnknown marks interrupted sends as ambiguous after a process restart.
+// MarkAllPendingUnknown recovers every send interrupted by the previous
+// single application process, regardless of its former lease deadline.
+func (s *Store) MarkAllPendingUnknown(ctx context.Context, updatedAt time.Time) (int, error) {
+	ctx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+
+	result, err := s.runner(ctx).ExecContext(ctx, markAllPendingUnknown, updatedAt.UTC().Unix())
+	if err != nil {
+		return 0, fmt.Errorf("mark all pending reminder deliveries unknown: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("count all recovered pending reminder deliveries: %w", err)
+	}
+	return int(rows), nil
+}
+
+// MarkPendingUnknown marks runtime attempts whose leases have expired.
 func (s *Store) MarkPendingUnknown(ctx context.Context, updatedAt time.Time) (int, error) {
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
-	result, err := s.db.ExecContext(ctx, markPendingUnknown, updatedAt.UTC().Unix())
+	unix := updatedAt.UTC().Unix()
+	result, err := s.runner(ctx).ExecContext(ctx, markPendingUnknown, unix, unix)
 	if err != nil {
 		return 0, fmt.Errorf("mark pending reminder deliveries unknown: %w", err)
 	}
@@ -124,9 +172,14 @@ func (s *Store) MarkPendingUnknown(ctx context.Context, updatedAt time.Time) (in
 const markUnknownRetryable = `
 	UPDATE reminder_deliveries
 	SET error_code = 'delivery_retryable', next_attempt_at = ?, updated_at = ?
-	WHERE user_id = ? AND billing_date = ? AND reminder_type = ?
+	WHERE rowid = (
+		SELECT rowid FROM reminder_deliveries
+		WHERE user_id = ? AND billing_date = ? AND reminder_type = ?
 		AND status = 'failed' AND error_code = 'delivery_state_unknown'
 		AND attempt_count < ?
+		ORDER BY updated_at DESC, delivery_key DESC
+		LIMIT 1
+	)
 `
 
 // MarkUnknownRetryable reopens an ambiguous row only after explicit confirmation
@@ -135,7 +188,7 @@ func (s *Store) MarkUnknownRetryable(ctx context.Context, userID domain.UserID, 
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
-	result, err := s.db.ExecContext(
+	result, err := s.runner(ctx).ExecContext(
 		ctx,
 		markUnknownRetryable,
 		updatedAt.UTC().Unix(),
@@ -157,14 +210,9 @@ func (s *Store) MarkUnknownRetryable(ctx context.Context, userID domain.UserID, 
 	return rows == 1, nil
 }
 
-const selectReminderDelivery = "SELECT billing_date, scheduled_date, status, sent_at, telegram_message_id, error_code, created_at, updated_at, attempt_count FROM reminder_deliveries WHERE user_id = ? AND billing_date = ? AND reminder_type = ?"
+const selectReminderDelivery = "SELECT billing_date, scheduled_date, status, sent_at, telegram_message_id, error_code, created_at, updated_at, attempt_count, lease_expires_at FROM reminder_deliveries WHERE user_id = ? AND billing_date = ? AND reminder_type = ? AND delivery_key = ?"
 
-func (s *Store) reminderDelivery(ctx context.Context, userID domain.UserID, billingDate domain.Date, kind domain.ReminderType) (domain.ReminderDelivery, error) {
-	delivery, _, err := s.reminderDeliveryAttempt(ctx, userID, billingDate, kind)
-	return delivery, err
-}
-
-func (s *Store) reminderDeliveryAttempt(ctx context.Context, userID domain.UserID, billingDate domain.Date, kind domain.ReminderType) (domain.ReminderDelivery, int, error) {
+func (s *Store) reminderDeliveryAttempt(ctx context.Context, userID domain.UserID, billingDate domain.Date, kind domain.ReminderType, deliveryKey string) (domain.ReminderDelivery, int, error) {
 	var (
 		delivery             domain.ReminderDelivery
 		billing, scheduled   string
@@ -173,10 +221,11 @@ func (s *Store) reminderDeliveryAttempt(ctx context.Context, userID domain.UserI
 		errorCode            sql.NullString
 		createdAt, updatedAt int64
 		attempt              int
+		leaseExpiresAt       sql.NullInt64
 	)
 
-	err := s.db.QueryRowContext(ctx, selectReminderDelivery, userID, billingDate.String(), kind).Scan(
-		&billing, &scheduled, &delivery.Status, &sentAt, &messageID, &errorCode, &createdAt, &updatedAt, &attempt,
+	err := s.runner(ctx).QueryRowContext(ctx, selectReminderDelivery, userID, billingDate.String(), kind, deliveryKey).Scan(
+		&billing, &scheduled, &delivery.Status, &sentAt, &messageID, &errorCode, &createdAt, &updatedAt, &attempt, &leaseExpiresAt,
 	)
 
 	if err != nil {
@@ -185,6 +234,8 @@ func (s *Store) reminderDeliveryAttempt(ctx context.Context, userID domain.UserI
 
 	delivery.UserID = userID
 	delivery.ReminderType = kind
+	delivery.DeliveryKey = deliveryKey
+	delivery.AttemptCount = attempt
 	delivery.BillingDate, err = domain.ParseDate(billing)
 	if err != nil {
 		return domain.ReminderDelivery{}, 0, err
@@ -200,6 +251,7 @@ func (s *Store) reminderDeliveryAttempt(ctx context.Context, userID domain.UserI
 	delivery.ErrorCode = stringPointer(errorCode)
 	delivery.CreatedAt = time.Unix(createdAt, 0).UTC()
 	delivery.UpdatedAt = time.Unix(updatedAt, 0).UTC()
+	delivery.LeaseExpiresAt = reminderTimePointer(leaseExpiresAt)
 
 	return delivery, attempt, nil
 }
@@ -222,17 +274,45 @@ const reminderCandidateUserColumns = `
 // ReminderCandidates returns active users with one aggregated balance and their
 // latest non-reversed subscription charge period on or before asOf.
 func (s *Store) ReminderCandidates(ctx context.Context, asOf domain.Date) ([]reminder.Candidate, error) {
+	var candidates []reminder.Candidate
+	var afterID domain.UserID
+	for {
+		page, hasMore, err := s.ReminderCandidatesPage(ctx, asOf, afterID, 1000)
+		if err != nil {
+			return nil, err
+		}
+		candidates = append(candidates, page...)
+		if !hasMore || len(page) == 0 {
+			return candidates, nil
+		}
+		afterID = page[len(page)-1].User.ID
+	}
+}
+
+// ReminderCandidatesPage returns a bounded active-user page and aggregates
+// ledger data only for users in that page.
+func (s *Store) ReminderCandidatesPage(ctx context.Context, asOf domain.Date, afterID domain.UserID, limit int) ([]reminder.Candidate, bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
+	if limit <= 0 {
+		return nil, false, fmt.Errorf("reminder candidate page limit must be positive")
+	}
 
-	rows, err := s.db.QueryContext(ctx, `
-		WITH balances AS (
-			SELECT user_id, SUM(amount_minor) AS balance_minor
-			FROM ledger_entries
-			GROUP BY user_id
+	rows, err := s.runner(ctx).QueryContext(ctx, `
+		WITH target_users AS (
+			SELECT * FROM users
+			WHERE status = ? AND id > ?
+			ORDER BY id ASC
+			LIMIT ?
+		), balances AS (
+			SELECT entries.user_id, SUM(entries.amount_minor) AS balance_minor
+			FROM ledger_entries AS entries
+			JOIN target_users ON target_users.id = entries.user_id
+			GROUP BY entries.user_id
 		), latest_charges AS (
 			SELECT charges.user_id, MAX(charges.billing_period_on) AS billing_period_on
 			FROM ledger_entries AS charges
+			JOIN target_users ON target_users.id = charges.user_id
 			LEFT JOIN ledger_entries AS reversals
 				ON reversals.reverses_entry_id = charges.id
 				AND reversals.kind = 'reversal'
@@ -244,14 +324,13 @@ func (s *Store) ReminderCandidates(ctx context.Context, asOf domain.Date) ([]rem
 		SELECT `+reminderCandidateUserColumns+`,
 			COALESCE(balances.balance_minor, 0),
 			latest_charges.billing_period_on
-		FROM users AS u
+		FROM target_users AS u
 		LEFT JOIN balances ON balances.user_id = u.id
 		LEFT JOIN latest_charges ON latest_charges.user_id = u.id
-		WHERE u.status = ?
 		ORDER BY u.id ASC
-	`, asOf.String(), domain.UserStatusActive)
+	`, domain.UserStatusActive, afterID, limit+1, asOf.String())
 	if err != nil {
-		return nil, fmt.Errorf("select reminder candidates: %w", err)
+		return nil, false, fmt.Errorf("select reminder candidates: %w", err)
 	}
 	defer rows.Close()
 
@@ -259,16 +338,19 @@ func (s *Store) ReminderCandidates(ctx context.Context, asOf domain.Date) ([]rem
 	for rows.Next() {
 		candidate, err := scanReminderCandidate(rows)
 		if err != nil {
-			return nil, fmt.Errorf("scan reminder candidate: %w", err)
+			return nil, false, fmt.Errorf("scan reminder candidate: %w", err)
 		}
 		candidates = append(candidates, candidate)
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate reminder candidates: %w", err)
+		return nil, false, fmt.Errorf("iterate reminder candidates: %w", err)
 	}
-
-	return candidates, nil
+	hasMore := len(candidates) > limit
+	if hasMore {
+		candidates = candidates[:limit]
+	}
+	return candidates, hasMore, nil
 }
 
 func scanReminderCandidate(scanner rowScanner) (reminder.Candidate, error) {

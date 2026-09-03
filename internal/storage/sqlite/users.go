@@ -50,7 +50,7 @@ func (s *Store) CreateUser(ctx context.Context, user domain.User) (domain.User, 
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
-	result, err := s.db.ExecContext(
+	result, err := s.runner(ctx).ExecContext(
 		ctx,
 		createUserQuery,
 		user.TelegramUserID,
@@ -88,7 +88,7 @@ func (s *Store) UserByID(ctx context.Context, userID domain.UserID) (domain.User
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
-	user, err := scanUser(s.db.QueryRowContext(ctx, selectUserByIDQuery, userID))
+	user, err := scanUser(s.runner(ctx).QueryRowContext(ctx, selectUserByIDQuery, userID))
 	if err != nil {
 		return domain.User{}, wrapUserReadError("UserByID", err)
 	}
@@ -110,7 +110,7 @@ func (s *Store) ListUsers(ctx context.Context, status *domain.UserStatus) ([]dom
 	}
 	query += ` ORDER BY id ASC`
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.runner(ctx).QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list users: %w", err)
 	}
@@ -146,7 +146,7 @@ func (s *Store) ListUsersPage(ctx context.Context, status *domain.UserStatus, af
 	query += ` ORDER BY id ASC LIMIT ?`
 	args = append(args, limit+1)
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.runner(ctx).QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, false, fmt.Errorf("list user page: %w", err)
 	}
@@ -177,13 +177,41 @@ func (s *Store) UserStatusCounts(ctx context.Context) (account.UserStatusCounts,
 	defer cancel()
 
 	var counts account.UserStatusCounts
-	err := s.db.QueryRowContext(ctx, `
+	err := s.runner(ctx).QueryRowContext(ctx, `
+		WITH balances AS (
+			SELECT user_id, SUM(amount_minor) AS balance_minor
+			FROM ledger_entries
+			GROUP BY user_id
+		), latest_deliveries AS (
+			SELECT user_id,
+			       error_code,
+			       ROW_NUMBER() OVER (
+				   PARTITION BY user_id
+				   ORDER BY updated_at DESC, rowid DESC
+			       ) AS sequence
+			FROM reminder_deliveries
+		)
 		SELECT COUNT(*),
-		       COALESCE(SUM(status = 'active'), 0),
-		       COALESCE(SUM(status = 'paused'), 0),
-		       COALESCE(SUM(status = 'disabled'), 0)
-		FROM users
-	`).Scan(&counts.Total, &counts.Active, &counts.Paused, &counts.Disabled)
+		       COALESCE(SUM(u.status = 'active'), 0),
+		       COALESCE(SUM(u.status = 'paused'), 0),
+		       COALESCE(SUM(u.status = 'disabled'), 0),
+		       COALESCE(SUM(COALESCE(b.balance_minor, 0) < 0), 0),
+		       COALESCE(SUM(u.status = 'active' AND COALESCE(b.balance_minor, 0) < u.monthly_fee_minor), 0),
+		       COALESCE(SUM(u.telegram_user_id IS NULL OR u.telegram_chat_id IS NULL), 0),
+		       COALESCE(SUM(COALESCE(d.error_code, '') = 'unreachable'), 0)
+		FROM users AS u
+		LEFT JOIN balances AS b ON b.user_id = u.id
+		LEFT JOIN latest_deliveries AS d ON d.user_id = u.id AND d.sequence = 1
+	`).Scan(
+		&counts.Total,
+		&counts.Active,
+		&counts.Paused,
+		&counts.Disabled,
+		&counts.Debtors,
+		&counts.Insufficient,
+		&counts.Unlinked,
+		&counts.Unreachable,
+	)
 	if err != nil {
 		return account.UserStatusCounts{}, fmt.Errorf("count users by status: %w", err)
 	}
@@ -197,7 +225,7 @@ func (s *Store) UserByTelegramID(ctx context.Context, telegramID int64) (domain.
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
-	user, err := scanUser(s.db.QueryRowContext(ctx, selectUserByTelegramIDQuery, telegramID))
+	user, err := scanUser(s.runner(ctx).QueryRowContext(ctx, selectUserByTelegramIDQuery, telegramID))
 	if err != nil {
 		return domain.User{}, wrapUserReadError("UserByTelegramID", err)
 	}
@@ -293,10 +321,11 @@ func (s *Store) setUserStatus(
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
-	user, err := scanUser(s.db.QueryRowContext(ctx, query, args...))
+	runner := s.runner(ctx)
+	user, err := scanUser(runner.QueryRowContext(ctx, query, args...))
 	if errors.Is(err, sql.ErrNoRows) {
 		var exists bool
-		if existsErr := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE id = ?)`, userID).Scan(&exists); existsErr != nil {
+		if existsErr := runner.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE id = ?)`, userID).Scan(&exists); existsErr != nil {
 			return domain.User{}, fmt.Errorf("check user status transition: %w", existsErr)
 		}
 		if !exists {
@@ -320,7 +349,7 @@ func (s *Store) updateUser(
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
-	user, err := scanUser(s.db.QueryRowContext(ctx, query, args...))
+	user, err := scanUser(s.runner(ctx).QueryRowContext(ctx, query, args...))
 	if err != nil {
 		return domain.User{}, wrapUserReadError(operation, err)
 	}

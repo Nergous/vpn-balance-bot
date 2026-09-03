@@ -107,7 +107,7 @@ func newTestSQLite(t *testing.T, ctx context.Context) *Store {
 	t.Helper()
 
 	path := filepath.Join(t.TempDir(), "vpn-balance-bot.db")
-	store, err := New(ctx, path, time.Second)
+	store, err := New(ctx, path, 5*time.Second)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}

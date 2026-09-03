@@ -155,6 +155,20 @@ func TestCreateInviteTokenRejectsUnknownUser(t *testing.T) {
 	}
 }
 
+func TestCreateInviteTokenRejectsAlreadyLinkedUser(t *testing.T) {
+	ctx := context.Background()
+	store := newInviteStore(t, ctx)
+	now := time.Date(2026, time.September, 2, 10, 0, 0, 0, time.UTC)
+	user := createInviteUser(t, store, ctx, 1, now)
+	if _, err := store.db.ExecContext(ctx, `UPDATE users SET telegram_user_id = 101, telegram_chat_id = 202 WHERE id = ?`, user.ID); err != nil {
+		t.Fatal(err)
+	}
+	err := store.CreateInviteToken(ctx, account.CreateInviteTokenRecord{TokenHash: "hash", UserID: user.ID, CreatedAt: now, ExpiresAt: now.Add(time.Hour)})
+	if !errors.Is(err, account.ErrInviteUserLinked) {
+		t.Fatalf("CreateInviteToken() error = %v, want %v", err, account.ErrInviteUserLinked)
+	}
+}
+
 func TestCreateInviteTokenReplacesUnusedAndPreservesUsedAudit(t *testing.T) {
 	ctx := context.Background()
 	store := newInviteStore(t, ctx)

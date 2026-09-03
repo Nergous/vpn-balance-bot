@@ -2,48 +2,56 @@ package telegram
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html"
+	"io"
 	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
 	"time"
 
 	botapi "github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 )
 
-// ErrInitialize means that the production Telegram client could not be created.
 var ErrInitialize = errors.New("failed to initialize Telegram client")
 
-// Client is the narrow Telegram output boundary used by handlers.
+type initializeError struct{ cause error }
+
+func (e initializeError) Error() string        { return ErrInitialize.Error() }
+func (e initializeError) Unwrap() error        { return e.cause }
+func (e initializeError) Is(target error) bool { return target == ErrInitialize }
+
 type Client interface {
-	SendText(ctx context.Context, chatID int64, text string) (int, error)
-	SendInviteToken(ctx context.Context, chatID int64, title, copyLabel, token string) (int, error)
+	SendText(context.Context, int64, string) (int, error)
+	SendInviteToken(context.Context, int64, string, string, string) (int, error)
 }
 
-// poller is the lifecycle boundary implemented by the production client.
-type poller interface {
-	Start(context.Context)
-}
+type poller interface{ Start(context.Context) }
 
 type productionClient struct {
-	bot *botapi.Bot
+	bot        *botapi.Bot
+	adapter    *Bot
+	httpClient *http.Client
+	pollURL    string
+	pollWait   int
 }
 
 func (c *productionClient) SendText(ctx context.Context, chatID int64, text string) (int, error) {
-	message, err := c.bot.SendMessage(ctx, &botapi.SendMessageParams{
-		ChatID: chatID,
-		Text:   text,
-	})
-
-	if err != nil {
-		return 0, err
+	var lastMessageID int
+	for _, part := range splitTelegramText(text) {
+		message, err := c.bot.SendMessage(ctx, &botapi.SendMessageParams{ChatID: chatID, Text: part})
+		if err != nil {
+			return 0, err
+		}
+		lastMessageID = message.ID
 	}
-
-	return message.ID, nil
+	return lastMessageID, nil
 }
 
-// SendInviteToken hides the token until revealed and provides native Telegram copying.
 func (c *productionClient) SendInviteToken(ctx context.Context, chatID int64, title, copyLabel, token string) (int, error) {
 	message, err := c.bot.SendMessage(ctx, &botapi.SendMessageParams{
 		ChatID:    chatID,
@@ -53,60 +61,174 @@ func (c *productionClient) SendInviteToken(ctx context.Context, chatID int64, ti
 			Text: copyLabel, CopyText: &models.CopyTextButton{Text: token},
 		}}}},
 	})
-
 	if err != nil {
 		return 0, err
 	}
-
 	return message.ID, nil
 }
 
 func (c *productionClient) Start(ctx context.Context) {
-	c.bot.Start(ctx)
+	var offset int64
+	var backoff time.Duration
+	for ctx.Err() == nil {
+		if backoff > 0 {
+			timer := time.NewTimer(backoff)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+		}
+		updates, retryAfter, err := c.getUpdates(ctx, offset)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			c.adapter.reportClientError(err)
+			if retryAfter > 0 {
+				backoff = retryAfter
+			} else {
+				backoff = nextPollBackoff(backoff)
+			}
+			continue
+		}
+		backoff = 0
+		for _, update := range updates {
+			if err := c.adapter.processUpdate(ctx, update, c.bot); err != nil {
+				c.adapter.reportUpdateError(update, err)
+				backoff = nextPollBackoff(backoff)
+				break
+			}
+			offset = update.ID + 1
+		}
+	}
 }
 
-// newProductionBot registers all production command and callback handlers.
+func nextPollBackoff(previous time.Duration) time.Duration {
+	if previous <= 0 {
+		return 100 * time.Millisecond
+	}
+	previous *= 2
+	if previous > 5*time.Second {
+		return 5 * time.Second
+	}
+	return previous
+}
+
+type getUpdatesResponse struct {
+	OK         bool             `json:"ok"`
+	Result     []*models.Update `json:"result"`
+	ErrorCode  int              `json:"error_code"`
+	Parameters struct {
+		RetryAfter int `json:"retry_after"`
+	} `json:"parameters"`
+}
+
+func (c *productionClient) getUpdates(ctx context.Context, offset int64) ([]*models.Update, time.Duration, error) {
+	form := url.Values{}
+	form.Set("offset", strconv.FormatInt(offset, 10))
+	form.Set("limit", "25")
+	form.Set("timeout", strconv.Itoa(c.pollWait))
+	form.Set("allowed_updates", `["message","callback_query"]`)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.pollURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, 0, errors.New("create Telegram polling request")
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, 0, fmt.Errorf("telegram polling transport: %w", err)
+	}
+	defer response.Body.Close()
+	var payload getUpdatesResponse
+	if err := json.NewDecoder(io.LimitReader(response.Body, 8<<20)).Decode(&payload); err != nil {
+		return nil, 0, errors.New("decode Telegram polling response")
+	}
+	if response.StatusCode != http.StatusOK || !payload.OK {
+		return nil, time.Duration(payload.Parameters.RetryAfter) * time.Second, fmt.Errorf("telegram polling API error %d", payload.ErrorCode)
+	}
+	return payload.Result, 0, nil
+}
+
 func newProductionBot(token string, adapter *Bot, httpTimeout time.Duration) (*productionClient, error) {
+	httpClient := &http.Client{Timeout: httpTimeout}
 	b, err := botapi.New(token,
-		botapi.WithHTTPClient(httpTimeout, &http.Client{Timeout: httpTimeout}),
+		botapi.WithHTTPClient(httpTimeout, httpClient),
 		botapi.WithErrorsHandler(adapter.reportClientError),
-		botapi.WithMessageTextHandler("start", botapi.MatchTypeCommand, adapter.startUpdate),
-		botapi.WithMessageTextHandler("status", botapi.MatchTypeCommand, adapter.statusUpdate),
-		botapi.WithMessageTextHandler("history", botapi.MatchTypeCommand, adapter.historyUpdate),
-		botapi.WithMessageTextHandler("help", botapi.MatchTypeCommand, adapter.helpUpdate),
-		botapi.WithMessageTextHandler("admin", botapi.MatchTypeCommand, adapter.adminUpdate),
-		botapi.WithCallbackQueryDataHandler("user_", botapi.MatchTypePrefix, adapter.callbackUpdate),
 	)
 	if err != nil {
-		return nil, ErrInitialize
+		return nil, initializeError{cause: err}
 	}
-
 	return &productionClient{
-		bot: b,
+		bot:        b,
+		adapter:    adapter,
+		httpClient: httpClient,
+		pollURL:    "https://api.telegram.org/bot" + token + "/getUpdates",
+		pollWait:   max(1, int(httpTimeout.Seconds())-1),
 	}, nil
 }
 
-// adminUpdate converts an /admin update into the transport-neutral command handler.
-func (b *Bot) adminUpdate(ctx context.Context, _ *botapi.Bot, update *models.Update) {
+func (b *Bot) processUpdate(ctx context.Context, update *models.Update, raw *botapi.Bot) error {
+	if update == nil {
+		return nil
+	}
+	handle := func(handlerCtx context.Context) error { return b.routeUpdate(handlerCtx, update, raw) }
+	if isManualReminderUpdate(update) {
+		err := handle(ctx)
+		var acknowledgementErr adminAcknowledgementError
+		if errors.As(err, &acknowledgementErr) {
+			b.reportUpdateError(update, acknowledgementErr)
+			return nil
+		}
+		return err
+	}
+	if b.updates != nil && isStateChangingUpdate(update) {
+		handlerCtx, effects := withPostCommitQueue(ctx)
+		processed, err := b.updates.ProcessTelegramUpdate(handlerCtx, update.ID, handle)
+		if err != nil {
+			return err
+		}
+		if processed {
+			b.reportUpdateError(update, effects.flush(ctx))
+		}
+		return nil
+	}
+	return handle(ctx)
+}
+
+func (b *Bot) routeUpdate(ctx context.Context, update *models.Update, raw *botapi.Bot) error {
+	if update.CallbackQuery != nil {
+		callback, ok := incomingCallback(update)
+		if _, err := raw.AnswerCallbackQuery(ctx, &botapi.AnswerCallbackQueryParams{CallbackQueryID: update.CallbackQuery.ID}); err != nil {
+			b.reportCallbackError("acknowledge", callback, err)
+		}
+		if !ok {
+			return nil
+		}
+		return b.HandleCallback(ctx, callback)
+	}
 	message, ok := incomingMessage(update)
 	if !ok {
-		return
+		return nil
 	}
-	if err := b.HandleAdminCommand(ctx, message); err != nil {
-		b.reportMessageError("admin", message, err)
+	switch telegramCommand(message.Text) {
+	case "start":
+		return b.HandleStart(ctx, message)
+	case "status":
+		return b.HandleStatus(ctx, message)
+	case "history":
+		return b.HandleHistory(ctx, message)
+	case "help":
+		return b.HandleHelp(ctx, message)
+	case "admin":
+		return b.HandleAdminCommand(ctx, message)
+	default:
+		return nil
 	}
 }
 
-func (b *Bot) startUpdate(ctx context.Context, _ *botapi.Bot, update *models.Update) {
-	message, ok := incomingMessage(update)
-	if !ok {
-		return
-	}
-	if err := b.HandleStart(ctx, message); err != nil {
-		b.reportMessageError("start", message, err)
-	}
-}
-
+// statusUpdate remains a narrow compatibility adapter for direct handler tests.
 func (b *Bot) statusUpdate(ctx context.Context, _ *botapi.Bot, update *models.Update) {
 	message, ok := incomingMessage(update)
 	if !ok {
@@ -117,57 +239,53 @@ func (b *Bot) statusUpdate(ctx context.Context, _ *botapi.Bot, update *models.Up
 	}
 }
 
-func (b *Bot) historyUpdate(ctx context.Context, _ *botapi.Bot, update *models.Update) {
-	message, ok := incomingMessage(update)
-	if !ok {
-		return
+func telegramCommand(text string) string {
+	parts := strings.Fields(text)
+	if len(parts) == 0 || !strings.HasPrefix(parts[0], "/") {
+		return ""
 	}
-	if err := b.HandleHistory(ctx, message); err != nil {
-		b.reportMessageError("history", message, err)
+	command := strings.TrimPrefix(parts[0], "/")
+	if index := strings.IndexByte(command, '@'); index >= 0 {
+		command = command[:index]
+	}
+	return strings.ToLower(command)
+}
+
+func isStateChangingUpdate(update *models.Update) bool {
+	if update == nil || update.Message == nil {
+		return false
+	}
+	parts := strings.Fields(update.Message.Text)
+	command := telegramCommand(update.Message.Text)
+	if command == "start" {
+		return len(parts) > 1
+	}
+	if command != "admin" || len(parts) < 2 {
+		return false
+	}
+	switch strings.ToLower(parts[1]) {
+	case "invite", "create", "pause", "disable", "resume", "fee", "opening", "adjustment", "reverse", "payment", "confirm", "cancel", "remind", "reconcile":
+		return true
+	default:
+		return false
 	}
 }
 
-func (b *Bot) helpUpdate(ctx context.Context, _ *botapi.Bot, update *models.Update) {
-	message, ok := incomingMessage(update)
-	if !ok {
-		return
+func isManualReminderUpdate(update *models.Update) bool {
+	if update == nil || update.Message == nil {
+		return false
 	}
-	if err := b.HandleHelp(ctx, message); err != nil {
-		b.reportMessageError("help", message, err)
-	}
-}
-func (b *Bot) callbackUpdate(ctx context.Context, raw *botapi.Bot, update *models.Update) {
-	callback, ok := incomingCallback(update)
-	if update.CallbackQuery == nil {
-		return
-	}
-
-	_, err := raw.AnswerCallbackQuery(ctx, &botapi.AnswerCallbackQueryParams{
-		CallbackQueryID: update.CallbackQuery.ID,
-	})
-	if err != nil {
-		b.reportCallbackError("acknowledge", callback, err)
-	}
-
-	if !ok {
-		return
-	}
-	if err := b.HandleCallback(ctx, callback); err != nil {
-		b.reportCallbackError("handle", callback, err)
-	}
+	parts := strings.Fields(update.Message.Text)
+	return telegramCommand(update.Message.Text) == "admin" && len(parts) >= 2 && strings.EqualFold(parts[1], "remind")
 }
 
 func incomingMessage(update *models.Update) (IncomingMessage, bool) {
 	if update == nil || update.Message == nil {
 		return IncomingMessage{}, false
 	}
-
 	message := IncomingMessage{
-		UpdateID:  update.ID,
-		MessageID: update.Message.ID,
-		ChatID:    update.Message.Chat.ID,
-		ChatType:  ChatType(update.Message.Chat.Type),
-		Text:      update.Message.Text,
+		UpdateID: update.ID, MessageID: update.Message.ID, ChatID: update.Message.Chat.ID,
+		ChatType: ChatType(update.Message.Chat.Type), Text: update.Message.Text,
 	}
 	if update.Message.From != nil {
 		message.UserID = update.Message.From.ID
@@ -180,23 +298,16 @@ func incomingCallback(update *models.Update) (IncomingCallback, bool) {
 	if update == nil || update.CallbackQuery == nil {
 		return IncomingCallback{}, false
 	}
-
 	callback := IncomingCallback{
-		UpdateID:        update.ID,
-		CallbackQueryID: update.CallbackQuery.ID,
-		UserID:          update.CallbackQuery.From.ID,
-		Data:            update.CallbackQuery.Data,
+		UpdateID: update.ID, CallbackQueryID: update.CallbackQuery.ID,
+		UserID: update.CallbackQuery.From.ID, Data: update.CallbackQuery.Data,
 	}
 	if message := update.CallbackQuery.Message.Message; message != nil {
-		callback.MessageID = message.ID
-		callback.ChatID = message.Chat.ID
-		callback.ChatType = ChatType(message.Chat.Type)
+		callback.MessageID, callback.ChatID, callback.ChatType = message.ID, message.Chat.ID, ChatType(message.Chat.Type)
 		return callback, true
 	}
 	if message := update.CallbackQuery.Message.InaccessibleMessage; message != nil {
-		callback.MessageID = message.MessageID
-		callback.ChatID = message.Chat.ID
-		callback.ChatType = ChatType(message.Chat.Type)
+		callback.MessageID, callback.ChatID, callback.ChatType = message.MessageID, message.Chat.ID, ChatType(message.Chat.Type)
 		return callback, true
 	}
 	return callback, false

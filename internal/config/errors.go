@@ -13,7 +13,7 @@ var (
 	ErrInvalidTimezone             = errors.New("timezone is invalid")
 	ErrInvalidReminderHour         = errors.New("reminder hour is invalid")
 	ErrInvalidInviteTTL            = errors.New("invite TTL is invalid")
-	ErrInvalidHTTPTimeout          = errors.New("HTTP_TIMEOUT must be positive")
+	ErrInvalidHTTPTimeout          = errors.New("HTTP_TIMEOUT must be at least 2s")
 	ErrInvalidDBTimeout            = errors.New("DB_TIMEOUT must be positive")
 	ErrInvalidLogLevel             = errors.New("log level is invalid")
 	ErrInvalidBotLanguage          = errors.New("bot language is unsupported")

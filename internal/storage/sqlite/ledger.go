@@ -47,26 +47,19 @@ func (s *Store) CreateLedgerEntry(ctx context.Context, entry domain.LedgerEntry)
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return domain.LedgerEntry{}, fmt.Errorf("start ledger transaction: %w", err)
-	}
-	defer tx.Rollback()
-
-	if err := ensureLedgerUser(ctx, tx, entry.UserID); err != nil {
-		return domain.LedgerEntry{}, err
-	}
-
-	created, err := insertLedgerEntry(ctx, tx, entry)
-	if err != nil {
-		return domain.LedgerEntry{}, err
-	}
-
-	if err := tx.Commit(); err != nil {
-		return domain.LedgerEntry{}, fmt.Errorf("commit ledger transaction: %w", err)
-	}
-
-	return created, nil
+	var created domain.LedgerEntry
+	err := s.withTransaction(ctx, "ledger", func(txCtx context.Context, tx *sql.Tx) error {
+		if err := ensureLedgerUser(txCtx, tx, entry.UserID); err != nil {
+			return err
+		}
+		if err := ensureBalanceRange(txCtx, tx, entry.UserID, entry.AmountMinor); err != nil {
+			return err
+		}
+		var err error
+		created, err = insertLedgerEntry(txCtx, tx, entry)
+		return err
+	})
+	return created, err
 }
 
 // Balance returns the signed sum of every ledger entry for one user.
@@ -74,12 +67,13 @@ func (s *Store) Balance(ctx context.Context, userID domain.UserID) (domain.Amoun
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
-	if err := ensureLedgerUser(ctx, s.db, userID); err != nil {
+	runner := s.runner(ctx)
+	if err := ensureLedgerUser(ctx, runner, userID); err != nil {
 		return 0, err
 	}
 
 	var balance domain.AmountMinor
-	if err := s.db.QueryRowContext(ctx, `
+	if err := runner.QueryRowContext(ctx, `
 		SELECT COALESCE(SUM(amount_minor), 0) FROM ledger_entries WHERE user_id = ?
 	`, userID).Scan(&balance); err != nil {
 		return 0, fmt.Errorf("calculate balance: %w", err)
@@ -93,11 +87,12 @@ func (s *Store) LastLedgerEntries(ctx context.Context, userID domain.UserID, lim
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
-	if err := ensureLedgerUser(ctx, s.db, userID); err != nil {
+	runner := s.runner(ctx)
+	if err := ensureLedgerUser(ctx, runner, userID); err != nil {
 		return nil, err
 	}
 
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := runner.QueryContext(ctx, `
 		SELECT `+ledgerColumns+`
 		FROM ledger_entries
 		WHERE user_id = ?
@@ -131,11 +126,12 @@ func (s *Store) LastUnreversedPayment(ctx context.Context, userID domain.UserID)
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
-	if err := ensureLedgerUser(ctx, s.db, userID); err != nil {
+	runner := s.runner(ctx)
+	if err := ensureLedgerUser(ctx, runner, userID); err != nil {
 		return domain.LedgerEntry{}, false, err
 	}
 
-	entry, err := scanLedgerEntry(s.db.QueryRowContext(ctx, `
+	entry, err := scanLedgerEntry(runner.QueryRowContext(ctx, `
 		SELECT `+ledgerColumns+`
 		FROM ledger_entries AS payment
 		WHERE payment.user_id = ?
@@ -163,64 +159,54 @@ func (s *Store) ReverseLedgerEntry(ctx context.Context, record account.ReverseLe
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return domain.LedgerEntry{}, fmt.Errorf("start reversal transaction: %w", err)
-	}
+	var reversal domain.LedgerEntry
+	err := s.withTransaction(ctx, "reversal", func(txCtx context.Context, tx *sql.Tx) error {
+		original, err := ledgerEntryByID(txCtx, tx, record.EntryID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return account.ErrLedgerEntryNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("read reversal source: %w", err)
+		}
+		if original.UserID != record.UserID {
+			return account.ErrReversalUserMismatch
+		}
+		if original.Kind == domain.LedgerKindReversal {
+			return account.ErrCannotReverseReversal
+		}
 
-	defer tx.Rollback()
+		var alreadyReversed bool
+		if err := tx.QueryRowContext(txCtx, `
+			SELECT EXISTS(SELECT 1 FROM ledger_entries WHERE reverses_entry_id = ?)
+		`, original.ID).Scan(&alreadyReversed); err != nil {
+			return fmt.Errorf("check existing reversal: %w", err)
+		}
+		if alreadyReversed {
+			return account.ErrLedgerEntryAlreadyReversed
+		}
+		if original.AmountMinor.Int64() == math.MinInt64 {
+			return domain.ErrAmountOverflow
+		}
+		if err := ensureBalanceRange(txCtx, tx, original.UserID, -original.AmountMinor); err != nil {
+			return err
+		}
 
-	original, err := ledgerEntryByID(ctx, tx, record.EntryID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return domain.LedgerEntry{}, account.ErrLedgerEntryNotFound
-	}
-
-	if err != nil {
-		return domain.LedgerEntry{}, fmt.Errorf("read reversal source: %w", err)
-	}
-
-	if original.UserID != record.UserID {
-		return domain.LedgerEntry{}, account.ErrReversalUserMismatch
-	}
-
-	var alreadyReversed bool
-	if err := tx.QueryRowContext(ctx, `
-		SELECT EXISTS(SELECT 1 FROM ledger_entries WHERE reverses_entry_id = ?)
-	`, original.ID).Scan(&alreadyReversed); err != nil {
-		return domain.LedgerEntry{}, fmt.Errorf("check existing reversal: %w", err)
-	}
-
-	if alreadyReversed {
-		return domain.LedgerEntry{}, account.ErrLedgerEntryAlreadyReversed
-	}
-
-	if original.AmountMinor.Int64() == math.MinInt64 {
-		return domain.LedgerEntry{}, domain.ErrAmountOverflow
-	}
-
-	reversesEntryID := original.ID
-	createdByTelegramID := record.CreatedByTelegramID
-	note := record.Note
-	reversal, err := insertLedgerEntry(ctx, tx, domain.LedgerEntry{
-		UserID:              original.UserID,
-		Kind:                domain.LedgerKindReversal,
-		AmountMinor:         -original.AmountMinor,
-		OccurredAt:          record.OccurredAt,
-		ReversesEntryID:     &reversesEntryID,
-		CreatedByTelegramID: &createdByTelegramID,
-		Note:                &note,
-		CreatedAt:           record.CreatedAt,
+		reversesEntryID := original.ID
+		createdByTelegramID := record.CreatedByTelegramID
+		note := record.Note
+		reversal, err = insertLedgerEntry(txCtx, tx, domain.LedgerEntry{
+			UserID:              original.UserID,
+			Kind:                domain.LedgerKindReversal,
+			AmountMinor:         -original.AmountMinor,
+			OccurredAt:          record.OccurredAt,
+			ReversesEntryID:     &reversesEntryID,
+			CreatedByTelegramID: &createdByTelegramID,
+			Note:                &note,
+			CreatedAt:           record.CreatedAt,
+		})
+		return err
 	})
-
-	if err != nil {
-		return domain.LedgerEntry{}, err
-	}
-
-	if err := tx.Commit(); err != nil {
-		return domain.LedgerEntry{}, fmt.Errorf("commit reversal transaction: %w", err)
-	}
-
-	return reversal, nil
+	return reversal, err
 }
 
 type ledgerRowScanner interface {
@@ -302,6 +288,19 @@ func scanLedgerEntry(scanner ledgerRowScanner) (domain.LedgerEntry, error) {
 
 type ledgerUserQuerier interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func ensureBalanceRange(ctx context.Context, queryer ledgerUserQuerier, userID domain.UserID, delta domain.AmountMinor) error {
+	var current domain.AmountMinor
+	if err := queryer.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(amount_minor), 0) FROM ledger_entries WHERE user_id = ?
+	`, userID).Scan(&current); err != nil {
+		return fmt.Errorf("calculate balance before ledger write: %w", err)
+	}
+	if _, err := domain.AddAmounts(current, delta); err != nil {
+		return err
+	}
+	return nil
 }
 
 func ensureLedgerUser(ctx context.Context, queryer ledgerUserQuerier, userID domain.UserID) error {

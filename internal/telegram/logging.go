@@ -5,7 +5,37 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+
+	"github.com/go-telegram/bot/models"
 )
+
+func (b *Bot) reportUpdateError(update *models.Update, err error) {
+	if err == nil {
+		return
+	}
+	if message, ok := incomingMessage(update); ok {
+		operation := telegramCommand(message.Text)
+		if operation == "" {
+			operation = "handle"
+		}
+		b.reportMessageError(operation, message, err)
+		return
+	}
+	if callback, ok := incomingCallback(update); ok {
+		b.reportCallbackError("handle", callback, err)
+		return
+	}
+
+	attributes := []any{
+		slog.String("operation", "handle_update"),
+		slog.String("error_type", fmt.Sprintf("%T", err)),
+		slog.String("error_kind", safeErrorKind(err)),
+	}
+	if update != nil {
+		attributes = append(attributes, slog.Int64("update_id", update.ID))
+	}
+	b.logger.Error("Telegram update handler failed", attributes...)
+}
 
 func (b *Bot) reportMessageError(operation string, message IncomingMessage, err error) {
 	if err == nil {

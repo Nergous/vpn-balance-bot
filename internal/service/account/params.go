@@ -1,10 +1,28 @@
 package account
 
 import (
+	"context"
 	"time"
 
 	"github.com/Nergous/vpn-balance-bot/internal/domain"
 )
+
+// PaymentDraftRecord is a durable, unconfirmed administrator payment.
+type PaymentDraftRecord struct {
+	AdminTelegramID int64
+	UserID          domain.UserID
+	AmountMinor     domain.AmountMinor
+	Note            *string
+	UpdatedAt       time.Time
+}
+
+// PaymentDraftStorage is the optional persistence capability used by the
+// Telegram payment confirmation flow.
+type PaymentDraftStorage interface {
+	SavePaymentDraft(context.Context, PaymentDraftRecord) error
+	PaymentDraft(context.Context, int64) (PaymentDraftRecord, bool, error)
+	DeletePaymentDraft(context.Context, int64) error
+}
 
 // CreateUserParams contains inputs for a new customer billing profile.
 type CreateUserParams struct {
@@ -25,10 +43,14 @@ type UserFilter struct {
 
 // UserStatusCounts contains aggregate profile counts for the admin dashboard.
 type UserStatusCounts struct {
-	Total    int
-	Active   int
-	Paused   int
-	Disabled int
+	Total        int
+	Active       int
+	Paused       int
+	Disabled     int
+	Debtors      int
+	Insufficient int
+	Unlinked     int
+	Unreachable  int
 }
 
 // ChangeMonthlyFeeParams contains a profile-only tariff change.
@@ -80,6 +102,7 @@ type AddPaymentParams struct {
 	AmountMinor     domain.AmountMinor
 	AdminTelegramID int64
 	Note            *string
+	OccurredAt      *time.Time
 }
 
 // AddAdjustmentParams records a signed correction with an audit note.

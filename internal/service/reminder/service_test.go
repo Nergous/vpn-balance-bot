@@ -238,12 +238,15 @@ func (f *fakeStorage) ReserveReminderDelivery(_ context.Context, d domain.Remind
 	}
 	return d, attempt, f.reserved, nil
 }
-func (f *fakeStorage) UpdateReminderDeliveryAttempt(_ context.Context, d domain.ReminderDelivery, retryAt *time.Time) error {
+func (f *fakeStorage) UpdateReminderDeliveryAttempt(_ context.Context, d domain.ReminderDelivery, _ int, retryAt *time.Time) (bool, error) {
 	f.updated = append(f.updated, d)
 	f.retryAt = append(f.retryAt, retryAt)
-	return f.updateErr
+	return f.updateErr == nil, f.updateErr
 }
 func (f *fakeStorage) MarkPendingUnknown(context.Context, time.Time) (int, error) { return 0, nil }
+func (f *fakeStorage) MarkAllPendingUnknown(context.Context, time.Time) (int, error) {
+	return 0, nil
+}
 func (f *fakeStorage) MarkUnknownRetryable(context.Context, domain.UserID, domain.Date, domain.ReminderType, time.Time, int) (bool, error) {
 	f.unknownCalls++
 	return f.unknownMarked, nil

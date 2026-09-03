@@ -2,6 +2,7 @@ package account
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -24,7 +25,7 @@ func New(storage Storage, inviteTTL time.Duration) (*Service, error) {
 		return nil, ErrNilStorage
 	}
 
-	if inviteTTL <= 0 {
+	if inviteTTL < time.Second {
 		return nil, ErrInvalidInviteTTL
 	}
 
@@ -172,6 +173,59 @@ func (s *Service) Resume(ctx context.Context, params ResumeParams) (domain.User,
 // Disable permanently removes a customer profile from active billing.
 func (s *Service) Disable(ctx context.Context, userID domain.UserID) (domain.User, error) {
 	return s.storage.DisableUser(ctx, userID, s.nowUTC())
+}
+
+// SavePaymentDraft persists an administrator payment draft when supported by storage.
+func (s *Service) SavePaymentDraft(ctx context.Context, adminID int64, userID domain.UserID, amount domain.AmountMinor, note *string, occurredAt time.Time) (time.Time, error) {
+	storage, ok := s.storage.(PaymentDraftStorage)
+	if !ok {
+		return time.Time{}, errors.New("payment draft storage is unavailable")
+	}
+	if occurredAt.IsZero() {
+		occurredAt = s.nowUTC()
+	} else {
+		occurredAt = occurredAt.UTC()
+	}
+	err := storage.SavePaymentDraft(ctx, PaymentDraftRecord{
+		AdminTelegramID: adminID,
+		UserID:          userID,
+		AmountMinor:     amount,
+		Note:            note,
+		UpdatedAt:       occurredAt,
+	})
+	return occurredAt, err
+}
+
+// PaymentDraft loads a durable administrator payment draft.
+func (s *Service) PaymentDraft(ctx context.Context, adminID int64) (domain.UserID, domain.AmountMinor, *string, time.Time, bool, error) {
+	storage, ok := s.storage.(PaymentDraftStorage)
+	if !ok {
+		return 0, 0, nil, time.Time{}, false, errors.New("payment draft storage is unavailable")
+	}
+	draft, found, err := storage.PaymentDraft(ctx, adminID)
+	return draft.UserID, draft.AmountMinor, draft.Note, draft.UpdatedAt, found, err
+}
+
+// DeletePaymentDraft removes a confirmed or cancelled administrator draft.
+func (s *Service) DeletePaymentDraft(ctx context.Context, adminID int64) error {
+	storage, ok := s.storage.(PaymentDraftStorage)
+	if !ok {
+		return errors.New("payment draft storage is unavailable")
+	}
+	return storage.DeletePaymentDraft(ctx, adminID)
+}
+
+type telegramUpdateStorage interface {
+	ProcessTelegramUpdate(context.Context, int64, func(context.Context) error) (bool, error)
+}
+
+// ProcessTelegramUpdate atomically deduplicates one state-changing Telegram update.
+func (s *Service) ProcessTelegramUpdate(ctx context.Context, updateID int64, handler func(context.Context) error) (bool, error) {
+	storage, ok := s.storage.(telegramUpdateStorage)
+	if !ok {
+		return false, errors.New("telegram update storage is unavailable")
+	}
+	return storage.ProcessTelegramUpdate(ctx, updateID, handler)
 }
 
 func (s *Service) nowUTC() time.Time {

@@ -20,3 +20,13 @@ func TestAllReturnsSortedCopy(t *testing.T) {
 		t.Fatalf("All() exposed mutable migration slice: got %q, want %q", got, originalVersion)
 	}
 }
+
+func TestMigrationChecksumIsStableAndContentSensitive(t *testing.T) {
+	migration := Migration{Version: "001.sql", SQL: "SELECT 1;"}
+	if len(migration.Checksum()) != 64 {
+		t.Fatalf("Checksum() length = %d, want 64", len(migration.Checksum()))
+	}
+	if migration.Checksum() == (Migration{Version: migration.Version, SQL: "SELECT 2;"}).Checksum() {
+		t.Fatal("Checksum() did not change with SQL content")
+	}
+}

@@ -20,6 +20,29 @@ func TestAddPaymentRequiresPositiveAmount(t *testing.T) {
 	}
 }
 
+func TestAddPaymentPreservesExplicitOccurrenceTime(t *testing.T) {
+	createdAt := time.Date(2026, time.September, 3, 10, 0, 0, 0, time.UTC)
+	occurredAt := time.Date(2026, time.September, 2, 18, 30, 0, 0, time.FixedZone("payment", 3*60*60))
+	var got domain.LedgerEntry
+	storage := &fakeStorage{createLedgerEntry: func(_ context.Context, entry domain.LedgerEntry) (domain.LedgerEntry, error) {
+		got = entry
+		return entry, nil
+	}}
+	service := newService(storage, time.Hour, func() time.Time { return createdAt })
+
+	if _, err := service.AddPayment(context.Background(), AddPaymentParams{
+		UserID: 1, AmountMinor: 100, AdminTelegramID: 7, OccurredAt: &occurredAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !got.OccurredAt.Equal(occurredAt) || got.OccurredAt.Location() != time.UTC {
+		t.Fatalf("OccurredAt = %v", got.OccurredAt)
+	}
+	if !got.CreatedAt.Equal(createdAt) {
+		t.Fatalf("CreatedAt = %v", got.CreatedAt)
+	}
+}
+
 func TestManualLedgerOperationsBuildEntries(t *testing.T) {
 	now := time.Date(2026, time.August, 28, 10, 0, 0, 0, time.UTC)
 	var entries []domain.LedgerEntry

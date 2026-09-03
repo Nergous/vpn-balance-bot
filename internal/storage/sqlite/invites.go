@@ -26,43 +26,47 @@ func (s *Store) CreateInviteToken(ctx context.Context, record account.CreateInvi
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("start invite create transaction: %w", err)
-	}
-	defer tx.Rollback()
+	return s.withTransaction(ctx, "invite create", func(txCtx context.Context, tx *sql.Tx) error {
+		var linked bool
+		err := tx.QueryRowContext(txCtx, `
+			SELECT telegram_user_id IS NOT NULL OR telegram_chat_id IS NOT NULL
+			FROM users WHERE id = ?
+		`, record.UserID).Scan(&linked)
+		if errors.Is(err, sql.ErrNoRows) {
+			return account.ErrNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("check invite user: %w", err)
+		}
+		if linked {
+			return account.ErrInviteUserLinked
+		}
 
-	if _, err := tx.ExecContext(ctx, deleteUnusedInviteTokensQuery, record.UserID); err != nil {
-		return fmt.Errorf("delete prior unused invite tokens: %w", err)
-	}
+		if _, err := tx.ExecContext(txCtx, deleteUnusedInviteTokensQuery, record.UserID); err != nil {
+			return fmt.Errorf("delete prior unused invite tokens: %w", err)
+		}
 
-	result, err := tx.ExecContext(
-		ctx,
-		createInviteTokenQuery,
-		record.TokenHash,
-		record.UserID,
-		record.ExpiresAt.UTC().Unix(),
-		record.CreatedAt.UTC().Unix(),
-		record.UserID,
-	)
-	if err != nil {
-		return fmt.Errorf("create invite token: %w", err)
-	}
-
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("check created invite token: %w", err)
-	}
-
-	if rows == 0 {
-		return account.ErrNotFound
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit invite create transaction: %w", err)
-	}
-
-	return nil
+		result, err := tx.ExecContext(
+			txCtx,
+			createInviteTokenQuery,
+			record.TokenHash,
+			record.UserID,
+			record.ExpiresAt.UTC().Unix(),
+			record.CreatedAt.UTC().Unix(),
+			record.UserID,
+		)
+		if err != nil {
+			return fmt.Errorf("create invite token: %w", err)
+		}
+		rows, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("check created invite token: %w", err)
+		}
+		if rows == 0 {
+			return account.ErrNotFound
+		}
+		return nil
+	})
 }
 
 const inviteForConsumeQuery = `
@@ -94,83 +98,69 @@ func (s *Store) ConsumeInviteToken(ctx context.Context, record account.ConsumeIn
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return domain.User{}, fmt.Errorf("start invite consume transaction: %w", err)
-	}
+	var user domain.User
+	err := s.withTransaction(ctx, "invite consume", func(txCtx context.Context, tx *sql.Tx) error {
+		var (
+			userID         domain.UserID
+			expiresAt      int64
+			usedAt         sql.NullInt64
+			telegramUserID sql.NullInt64
+			telegramChatID sql.NullInt64
+		)
+		err := tx.QueryRowContext(txCtx, inviteForConsumeQuery, record.TokenHash).Scan(
+			&userID,
+			&expiresAt,
+			&usedAt,
+			&telegramUserID,
+			&telegramChatID,
+		)
+		if errors.Is(err, sql.ErrNoRows) {
+			return account.ErrInviteNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("read invite token: %w", err)
+		}
 
-	defer tx.Rollback()
+		consumedAt := record.ConsumedAt.UTC().Unix()
+		if usedAt.Valid {
+			return account.ErrInviteAlreadyUsed
+		}
+		if expiresAt <= consumedAt {
+			return account.ErrInviteExpired
+		}
+		if telegramUserID.Valid || telegramChatID.Valid {
+			return account.ErrInviteUserLinked
+		}
 
-	var (
-		userID         domain.UserID
-		expiresAt      int64
-		usedAt         sql.NullInt64
-		telegramUserID sql.NullInt64
-		telegramChatID sql.NullInt64
-	)
-	err = tx.QueryRowContext(ctx, inviteForConsumeQuery, record.TokenHash).Scan(
-		&userID,
-		&expiresAt,
-		&usedAt,
-		&telegramUserID,
-		&telegramChatID,
-	)
+		claimed, err := tx.ExecContext(txCtx, claimInviteTokenQuery, consumedAt, record.TokenHash, consumedAt)
+		if err != nil {
+			return fmt.Errorf("claim invite token: %w", err)
+		}
+		claimedRows, err := claimed.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("check invite token claim: %w", err)
+		}
+		if claimedRows == 0 {
+			return account.ErrInviteAlreadyUsed
+		}
 
-	if errors.Is(err, sql.ErrNoRows) {
-		return domain.User{}, account.ErrInviteNotFound
-	}
+		if _, err := tx.ExecContext(
+			txCtx,
+			bindInviteTelegramQuery,
+			record.TelegramUserID,
+			record.TelegramChatID,
+			consumedAt,
+			userID,
+		); err != nil {
+			return mapTelegramConstraintError("bind Telegram account", err)
+		}
 
-	if err != nil {
-		return domain.User{}, fmt.Errorf("read invite token: %w", err)
-	}
-
-	consumedAt := record.ConsumedAt.UTC().Unix()
-	if usedAt.Valid {
-		return domain.User{}, account.ErrInviteAlreadyUsed
-	}
-
-	if expiresAt <= consumedAt {
-		return domain.User{}, account.ErrInviteExpired
-	}
-
-	if telegramUserID.Valid || telegramChatID.Valid {
-		return domain.User{}, account.ErrInviteUserLinked
-	}
-
-	claimed, err := tx.ExecContext(ctx, claimInviteTokenQuery, consumedAt, record.TokenHash, consumedAt)
-	if err != nil {
-		return domain.User{}, fmt.Errorf("claim invite token: %w", err)
-	}
-
-	claimedRows, err := claimed.RowsAffected()
-	if err != nil {
-		return domain.User{}, fmt.Errorf("check invite token claim: %w", err)
-	}
-
-	if claimedRows == 0 {
-		return domain.User{}, account.ErrInviteAlreadyUsed
-	}
-
-	if _, err := tx.ExecContext(
-		ctx,
-		bindInviteTelegramQuery,
-		record.TelegramUserID,
-		record.TelegramChatID,
-		consumedAt,
-		userID,
-	); err != nil {
-		return domain.User{}, mapTelegramConstraintError("bind Telegram account", err)
-	}
-
-	query := `SELECT ` + userColumns + ` FROM users WHERE id = ?`
-	user, err := scanUser(tx.QueryRowContext(ctx, query, userID))
-	if err != nil {
-		return domain.User{}, wrapUserReadError("read bound user", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return domain.User{}, fmt.Errorf("commit invite consume transaction: %w", err)
-	}
-
-	return user, nil
+		query := `SELECT ` + userColumns + ` FROM users WHERE id = ?`
+		user, err = scanUser(tx.QueryRowContext(txCtx, query, userID))
+		if err != nil {
+			return wrapUserReadError("read bound user", err)
+		}
+		return nil
+	})
+	return user, err
 }

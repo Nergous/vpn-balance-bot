@@ -4,8 +4,8 @@ import "errors"
 
 var (
 	ErrNotFound                    = errors.New("account not found")
-	ErrTelegramUserIDTaken         = errors.New("Telegram user ID is already assigned")
-	ErrTelegramChatIDTaken         = errors.New("Telegram chat ID is already assigned")
+	ErrTelegramUserIDTaken         = errors.New("telegram user ID is already assigned")
+	ErrTelegramChatIDTaken         = errors.New("telegram chat ID is already assigned")
 	ErrNilStorage                  = errors.New("account storage is nil")
 	ErrInvalidDisplayName          = errors.New("display name is invalid")
 	ErrInvalidMonthlyFee           = errors.New("monthly fee must be positive")
@@ -16,7 +16,7 @@ var (
 	ErrInvalidUserStatusTransition = errors.New("user status transition is invalid")
 	ErrInvalidUserPageLimit        = errors.New("user page limit must be positive")
 	ErrResumeDateRequired          = errors.New("resume requires a next charge date")
-	ErrInvalidInviteTTL            = errors.New("invite TTL must be positive")
+	ErrInvalidInviteTTL            = errors.New("invite TTL must be at least one second")
 	ErrInvalidInviteToken          = errors.New("invite token is invalid")
 	ErrInviteNotFound              = errors.New("invite token not found")
 	ErrInviteExpired               = errors.New("invite token expired")
@@ -31,4 +31,5 @@ var (
 	ErrLedgerEntryNotFound         = errors.New("ledger entry not found")
 	ErrLedgerEntryAlreadyReversed  = errors.New("ledger entry already reversed")
 	ErrReversalUserMismatch        = errors.New("ledger entry belongs to another user")
+	ErrCannotReverseReversal       = errors.New("a reversal entry cannot be reversed")
 )

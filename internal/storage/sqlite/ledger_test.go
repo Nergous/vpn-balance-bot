@@ -72,9 +72,30 @@ func TestReverseLedgerEntry(t *testing.T) {
 	if !errors.Is(err, account.ErrLedgerEntryAlreadyReversed) {
 		t.Fatalf("second reversal error = %v", err)
 	}
+	_, err = store.ReverseLedgerEntry(ctx, account.ReverseLedgerEntryRecord{UserID: user.ID, EntryID: reversal.ID, CreatedByTelegramID: 7, Note: "reverse reversal", OccurredAt: now.Add(3 * time.Second), CreatedAt: now.Add(3 * time.Second)})
+	if !errors.Is(err, account.ErrCannotReverseReversal) {
+		t.Fatalf("reversal-of-reversal error = %v", err)
+	}
 	_, err = store.ReverseLedgerEntry(ctx, account.ReverseLedgerEntryRecord{UserID: user.ID + 1, EntryID: original.ID, CreatedByTelegramID: 7, Note: "wrong user", OccurredAt: now, CreatedAt: now})
 	if !errors.Is(err, account.ErrReversalUserMismatch) {
 		t.Fatalf("wrong-user reversal error = %v", err)
+	}
+}
+
+func TestCreateLedgerEntryRejectsCumulativeBalanceOverflow(t *testing.T) {
+	ctx := context.Background()
+	store := newLedgerStore(t, ctx)
+	now := time.Date(2026, time.September, 2, 10, 0, 0, 0, time.UTC)
+	user := createLedgerUser(t, store, ctx, 1, now)
+	if _, err := store.CreateLedgerEntry(ctx, newLedgerEntry(user.ID, domain.LedgerKindOpeningBalance, domain.AmountMinor(math.MaxInt64), now)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateLedgerEntry(ctx, newLedgerEntry(user.ID, domain.LedgerKindAdjustment, 1, now.Add(time.Second))); !errors.Is(err, domain.ErrAmountOverflow) {
+		t.Fatalf("overflow entry error = %v", err)
+	}
+	entries, err := store.LastLedgerEntries(ctx, user.ID, 10)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("entries after overflow = %d, %v", len(entries), err)
 	}
 }
 

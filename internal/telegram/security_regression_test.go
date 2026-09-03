@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -27,6 +28,7 @@ func TestClassifyReminderErrorRetriesOnlyDefiniteRateLimitRejections(t *testing.
 		{name: "forbidden", err: botapi.ErrorForbidden, want: reminder.DeliveryErrorOffline},
 		{name: "rate limited", err: &botapi.TooManyRequestsError{Message: "retry later", RetryAfter: 1}, want: reminder.DeliveryErrorRetryable},
 		{name: "deadline after uncertain send", err: context.DeadlineExceeded, want: reminder.DeliveryErrorUnknown},
+		{name: "temporary DNS failure", err: &net.DNSError{Err: "temporary", IsTemporary: true}, want: reminder.DeliveryErrorRetryable},
 		{name: "generic transport failure", err: errors.New("transport failed"), want: reminder.DeliveryErrorFailed},
 	}
 
@@ -172,7 +174,7 @@ func TestStatusUsesLastUnreversedPaymentCapability(t *testing.T) {
 	if err := bot.HandleStatus(context.Background(), IncomingMessage{ChatID: chatID, UserID: 11, ChatType: ChatTypePrivate}); err != nil {
 		t.Fatal(err)
 	}
-	if service.calls != 1 || len(client.Sent) != 1 || !strings.Contains(client.Sent[0].Text, "54321 RUB") {
+	if service.calls != 1 || len(client.Sent) != 1 || !strings.Contains(client.Sent[0].Text, "543.21 RUB") {
 		t.Fatalf("calls=%d sent=%#v", service.calls, client.Sent)
 	}
 }
@@ -219,6 +221,32 @@ func TestHandlerErrorReportsCorrelationWithoutSensitiveInput(t *testing.T) {
 	for _, secret := range []string{messageText, "secret-token", username, callbackData} {
 		if strings.Contains(logOutput, secret) {
 			t.Fatalf("log contains sensitive input %q: %s", secret, logOutput)
+		}
+	}
+}
+
+func TestProductionUpdateErrorReporterKeepsCorrelationWithoutMessageContents(t *testing.T) {
+	var output bytes.Buffer
+	bot := NewWithClient(&testutil.FakeTelegramClient{}, &fakeAdmin{}, LanguageEnglish)
+	bot.logger = slog.New(slog.NewJSONHandler(&output, nil))
+	secret := "/admin pause 7 private-note"
+	bot.reportUpdateError(&models.Update{
+		ID: 77,
+		Message: &models.Message{
+			ID: 9, Chat: models.Chat{ID: 22, Type: models.ChatTypePrivate},
+			From: &models.User{ID: 11, Username: "private-user"}, Text: secret,
+		},
+	}, errors.New("database private-note"))
+
+	got := output.String()
+	for _, expected := range []string{`"operation":"admin"`, `"update_id":77`, `"message_id":9`, `"chat_id":22`, `"telegram_user_id":11`} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("log missing %q: %s", expected, got)
+		}
+	}
+	for _, forbidden := range []string{secret, "private-note", "private-user"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("log exposed %q: %s", forbidden, got)
 		}
 	}
 }

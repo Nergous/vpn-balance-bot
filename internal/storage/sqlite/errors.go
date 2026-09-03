@@ -13,4 +13,8 @@ var (
 	ErrRecordMigration = errors.New("failed to record migration")
 	// ErrCommitMigration wraps failures that commit a migration transaction.
 	ErrCommitMigration = errors.New("failed to commit migration")
+	// ErrUnknownMigration means the database was migrated by a newer binary.
+	ErrUnknownMigration = errors.New("database contains unknown migration")
+	// ErrMigrationChecksum means an applied migration changed after deployment.
+	ErrMigrationChecksum = errors.New("applied migration checksum mismatch")
 )

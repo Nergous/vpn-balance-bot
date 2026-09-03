@@ -64,6 +64,28 @@ func TestBackupCreatesVerifiedSnapshot(t *testing.T) {
 	}
 }
 
+func TestPublishBackupAtomicallyRefusesExistingDestination(t *testing.T) {
+	directory := t.TempDir()
+	temporaryPath := filepath.Join(directory, "snapshot.tmp")
+	destinationPath := filepath.Join(directory, "snapshot.db")
+	if err := os.WriteFile(temporaryPath, []byte("new snapshot"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(destinationPath, []byte("existing snapshot"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := publishBackup(temporaryPath, destinationPath); !errors.Is(err, ErrBackupExists) {
+		t.Fatalf("publishBackup() error = %v", err)
+	}
+	content, err := os.ReadFile(destinationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "existing snapshot" {
+		t.Fatalf("destination was replaced: %q", content)
+	}
+}
+
 func TestBackupCancelledContextDoesNotPublishSnapshot(t *testing.T) {
 	store := newTestSQLite(t, context.Background())
 	if err := store.Migrate(context.Background()); err != nil {
@@ -118,6 +140,33 @@ func TestBackupExcludesUncommittedChanges(t *testing.T) {
 	}
 	if got := snapshotUserCount(t, ctx, path); got != 1 {
 		t.Fatalf("snapshot users = %d, want committed users only", got)
+	}
+}
+
+func TestIntegrityAndBackupRejectForeignKeyViolations(t *testing.T) {
+	ctx := context.Background()
+	store := newMigratedStore(t, ctx)
+	if _, err := store.db.ExecContext(ctx, "PRAGMA foreign_keys = OFF"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(ctx, `
+		INSERT INTO ledger_entries (user_id, kind, amount_minor, occurred_at, created_at)
+		VALUES (999, 'payment', 100, 1, 1)
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(ctx, "PRAGMA foreign_keys = ON"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.IntegrityCheck(ctx); err == nil {
+		t.Fatal("IntegrityCheck() accepted a foreign key violation")
+	}
+	path := filepath.Join(t.TempDir(), "invalid.db")
+	if err := store.Backup(ctx, path); err == nil {
+		t.Fatal("Backup() published a snapshot with a foreign key violation")
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("invalid backup was published: %v", err)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"time"
 
 	"github.com/Nergous/vpn-balance-bot/internal/domain"
@@ -15,9 +16,10 @@ import (
 
 // ErrUnauthorized means that a Telegram user has no linked billing profile.
 var (
-	ErrUnauthorized        = errors.New("Telegram user is not linked")
+	ErrUnauthorized        = errors.New("telegram user is not linked")
 	ErrPrivateChatRequired = errors.New("private Telegram chat required")
-	ErrInvalidHTTPTimeout  = errors.New("Telegram HTTP timeout must be positive")
+	ErrInvalidHTTPTimeout  = errors.New("telegram HTTP timeout must be at least 2s")
+	ErrTransactionalSend   = errors.New("reminder send is not allowed inside a Telegram update transaction")
 )
 
 // AccountService contains customer-facing account operations used by Bot.
@@ -71,6 +73,12 @@ type Bot struct {
 	admin    *Admin
 	language localization.Language
 	logger   *slog.Logger
+	updates  UpdateProcessor
+}
+
+// UpdateProcessor durably deduplicates state-changing Telegram updates.
+type UpdateProcessor interface {
+	ProcessTelegramUpdate(context.Context, int64, func(context.Context) error) (bool, error)
 }
 
 // New creates a production Telegram bot and validates its token through the adapter.
@@ -84,7 +92,7 @@ func New(
 	if _, err := localization.New(language); err != nil {
 		return nil, err
 	}
-	if httpTimeout <= 0 {
+	if httpTimeout < 2*time.Second {
 		return nil, ErrInvalidHTTPTimeout
 	}
 	if logger == nil {
@@ -96,13 +104,14 @@ func New(
 		language: language,
 		logger:   logger,
 	}
+	adapter.updates, _ = accounts.(UpdateProcessor)
 
 	client, err := newProductionBot(token, adapter, httpTimeout)
 	if err != nil {
 		return nil, err
 	}
 
-	adapter.client, adapter.poller = client, client
+	adapter.client, adapter.poller = deferClient(client), client
 	return adapter, nil
 }
 
@@ -110,11 +119,17 @@ func New(
 func NewWithClient(client Client, accounts AccountService, language localization.Language) *Bot {
 	localization.MustNew(language)
 	return &Bot{
-		client:   client,
+		client:   deferClient(client),
 		accounts: accounts,
 		language: language,
 		logger:   slog.Default(),
+		updates:  updateProcessor(accounts),
 	}
+}
+
+func updateProcessor(accounts AccountService) UpdateProcessor {
+	processor, _ := accounts.(UpdateProcessor)
+	return processor
 }
 
 func (m IncomingMessage) isPrivate() bool {
@@ -146,6 +161,9 @@ func (b *Bot) Start(ctx context.Context) {
 // SendReminder implements reminder.Sender using the same Telegram transport
 // that serves user commands.
 func (b *Bot) SendReminder(ctx context.Context, chatID int64, text string) (int, error) {
+	if postCommitQueueFromContext(ctx) != nil {
+		return 0, ErrTransactionalSend
+	}
 	return b.client.SendText(ctx, chatID, text)
 }
 
@@ -158,9 +176,27 @@ func (b *Bot) ClassifyReminderError(err error) reminder.DeliveryErrorCode {
 		return reminder.DeliveryErrorRetryable
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
 		return reminder.DeliveryErrorUnknown
+	case isDefinitelyPreSendNetworkError(err):
+		return reminder.DeliveryErrorRetryable
+	case isNetworkError(err):
+		return reminder.DeliveryErrorUnknown
 	default:
 		return reminder.DeliveryErrorFailed
 	}
+}
+
+func isDefinitelyPreSendNetworkError(err error) bool {
+	var dnsError *net.DNSError
+	if errors.As(err, &dnsError) {
+		return true
+	}
+	var operationError *net.OpError
+	return errors.As(err, &operationError) && operationError.Op == "dial"
+}
+
+func isNetworkError(err error) bool {
+	var networkError net.Error
+	return errors.As(err, &networkError)
 }
 
 func (b *Bot) send(ctx context.Context, chatID int64, text string) error {

@@ -47,10 +47,20 @@ func (s *Store) Backup(ctx context.Context, destinationPath string) error {
 		return fmt.Errorf("verify SQLite snapshot: %w", err)
 	}
 
-	if err := os.Rename(temporaryPath, destinationPath); err != nil {
-		return fmt.Errorf("finalize SQLite snapshot: %w", err)
+	if err := publishBackup(temporaryPath, destinationPath); err != nil {
+		return err
 	}
 
+	return nil
+}
+
+func publishBackup(temporaryPath, destinationPath string) error {
+	if err := os.Link(temporaryPath, destinationPath); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return ErrBackupExists
+		}
+		return fmt.Errorf("finalize SQLite snapshot: %w", err)
+	}
 	return nil
 }
 
@@ -67,7 +77,7 @@ func (s *Store) IntegrityCheck(ctx context.Context) error {
 		return fmt.Errorf("integrity check failed: %s", result)
 	}
 
-	return nil
+	return foreignKeyCheck(ctx, s.db)
 }
 
 func integrityCheckPath(ctx context.Context, path string) error {
@@ -86,5 +96,25 @@ func integrityCheckPath(ctx context.Context, path string) error {
 		return fmt.Errorf("integrity check failed: %s", result)
 	}
 
+	return foreignKeyCheck(ctx, db)
+}
+
+func foreignKeyCheck(ctx context.Context, db *sql.DB) error {
+	rows, err := db.QueryContext(ctx, "PRAGMA foreign_key_check")
+	if err != nil {
+		return fmt.Errorf("run foreign key check: %w", err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		var table, parent string
+		var rowID, foreignKeyID any
+		if err := rows.Scan(&table, &rowID, &parent, &foreignKeyID); err != nil {
+			return fmt.Errorf("scan foreign key violation: %w", err)
+		}
+		return fmt.Errorf("foreign key check failed: table %s references %s", table, parent)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate foreign key check: %w", err)
+	}
 	return nil
 }

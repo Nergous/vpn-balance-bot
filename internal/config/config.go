@@ -30,6 +30,7 @@ const (
 )
 
 const defaultTimezone = "Europe/Moscow"
+const minHTTPTimeout = 2 * time.Second
 
 const (
 	BotLanguageRussian = localization.Russian
@@ -58,6 +59,40 @@ type Config struct {
 
 // Load reads and validates configuration. It does not contact Telegram in test mode.
 func Load(ctx context.Context) (*Config, error) {
+	return load(ctx, true)
+}
+
+// LoadForMaintenance reads only database and logging settings. It does not
+// require Telegram credentials or contact external services.
+func LoadForMaintenance(_ context.Context) (*Config, error) {
+	appEnv, err := parseAppEnv(os.Getenv("APP_ENV"))
+	if err != nil {
+		return nil, err
+	}
+	if err := loadLocalEnvironment(appEnv); err != nil {
+		return nil, err
+	}
+	appEnv, err = parseAppEnv(os.Getenv("APP_ENV"))
+	if err != nil {
+		return nil, err
+	}
+	dbTimeout, err := optionalDuration("DB_TIMEOUT", 30*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	cfg := &Config{
+		DatabasePath: strings.TrimSpace(os.Getenv("DATABASE_PATH")),
+		DBTimeout:    dbTimeout,
+		LogLevel:     strings.ToUpper(optionalString("LOG_LEVEL", InfoLevel)),
+		AppEnv:       appEnv,
+	}
+	if err := validateMaintenanceConfig(cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+func load(ctx context.Context, validateToken bool) (*Config, error) {
 	appEnv, err := parseAppEnv(os.Getenv("APP_ENV"))
 	if err != nil {
 		return nil, err
@@ -78,8 +113,30 @@ func Load(ctx context.Context) (*Config, error) {
 	if err := validateConfig(cfg); err != nil {
 		return nil, err
 	}
+	if validateToken && cfg.AppEnv != EnvTest {
+		if err := validateTelegramBotToken(ctx, cfg.TelegramBotToken); err != nil {
+			return nil, err
+		}
+	}
 
 	return cfg, nil
+}
+
+func validateMaintenanceConfig(cfg *Config) error {
+	var errs []error
+	if cfg.DatabasePath == "" {
+		errs = append(errs, ErrDatabasePathRequired)
+	}
+	if cfg.DBTimeout <= 0 {
+		errs = append(errs, ErrInvalidDBTimeout)
+	}
+	if !validLogLevel(cfg.LogLevel) {
+		errs = append(errs, fmt.Errorf("%w: %q", ErrInvalidLogLevel, cfg.LogLevel))
+	}
+	if cfg.AppEnv == EnvProduction && isUnsafeProductionDatabasePath(cfg.DatabasePath) {
+		errs = append(errs, ErrUnsafeProductionDatabase)
+	}
+	return errors.Join(errs...)
 }
 
 // MustLoad is intended for application startup.
@@ -171,10 +228,10 @@ func validateConfig(cfg *Config) error {
 	if cfg.ReminderHour < 0 || cfg.ReminderHour > 23 {
 		errs = append(errs, ErrInvalidReminderHour)
 	}
-	if cfg.InviteTTL <= 0 {
+	if cfg.InviteTTL < time.Second {
 		errs = append(errs, ErrInvalidInviteTTL)
 	}
-	if cfg.HTTPTimeout <= 0 {
+	if cfg.HTTPTimeout < minHTTPTimeout {
 		errs = append(errs, ErrInvalidHTTPTimeout)
 	}
 	if cfg.DBTimeout <= 0 {

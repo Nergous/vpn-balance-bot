@@ -3,8 +3,10 @@ package telegram
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Nergous/vpn-balance-bot/internal/domain"
 	"github.com/Nergous/vpn-balance-bot/internal/service/account"
@@ -25,7 +27,9 @@ func TestAdminRejectsNonAdminBeforeMutation(t *testing.T) {
 func TestPaymentWizardConfirmsOnce(t *testing.T) {
 	service := &fakeAdmin{}
 	wizard := NewWizard()
-	wizard.BeginPayment(1, PaymentDraft{UserID: 7, AmountMinor: 100})
+	if _, err := wizard.BeginPayment(context.Background(), 1, PaymentDraft{UserID: 7, AmountMinor: 100}); err != nil {
+		t.Fatal(err)
+	}
 	if err := wizard.ConfirmPayment(context.Background(), 1, service); err != nil {
 		t.Fatal(err)
 	}
@@ -34,6 +38,25 @@ func TestPaymentWizardConfirmsOnce(t *testing.T) {
 	}
 	if err := wizard.ConfirmPayment(context.Background(), 1, service); err != ErrWizardNotFound {
 		t.Fatalf("second confirmation=%v", err)
+	}
+}
+
+func TestPaymentWizardKeepsDraftWhenLedgerWriteFails(t *testing.T) {
+	wizard := NewWizard()
+	ctx := context.Background()
+	if _, err := wizard.BeginPayment(ctx, 1, PaymentDraft{UserID: 7, AmountMinor: 100}); err != nil {
+		t.Fatal(err)
+	}
+	service := &fakeAdmin{paymentErr: errors.New("database unavailable")}
+	if err := wizard.ConfirmPayment(ctx, 1, service); err == nil {
+		t.Fatal("ConfirmPayment() unexpectedly succeeded")
+	}
+	service.paymentErr = nil
+	if err := wizard.ConfirmPayment(ctx, 1, service); err != nil {
+		t.Fatalf("retry ConfirmPayment() error = %v", err)
+	}
+	if service.paymentCalls != 2 {
+		t.Fatalf("payment calls = %d, want 2", service.paymentCalls)
 	}
 }
 func TestAdminDashboardAndCreateUser(t *testing.T) {
@@ -69,7 +92,7 @@ func TestAdminUsesBoundedQueryCapabilities(t *testing.T) {
 	if service.countCalls != 1 || service.pageCalls != 1 || service.afterID != 7 || service.limit != adminUserPageSize {
 		t.Fatalf("counts=%d pages=%d after=%d limit=%d", service.countCalls, service.pageCalls, service.afterID, service.limit)
 	}
-	if len(client.Sent) != 2 || !strings.Contains(client.Sent[0].Text, "Users: 4") || !strings.Contains(client.Sent[1].Text, "/admin users all 9") {
+	if len(client.Sent) != 2 || !strings.Contains(client.Sent[0].Text, "Users: 4") || !strings.Contains(client.Sent[1].Text, "/admin users active 9") {
 		t.Fatalf("sent=%#v", client.Sent)
 	}
 }
@@ -107,8 +130,72 @@ func TestAdminCommandRouterAuthorizesAndConfirmsPaymentOnce(t *testing.T) {
 	if service.paymentCalls != 1 {
 		t.Fatalf("payment calls = %d", service.paymentCalls)
 	}
-	if err := bot.HandleAdminCommand(context.Background(), IncomingMessage{ChatID: 1, UserID: 1, ChatType: ChatTypePrivate, Text: "/admin confirm"}); !errors.Is(err, ErrWizardNotFound) {
+	if err := bot.HandleAdminCommand(context.Background(), IncomingMessage{ChatID: 1, UserID: 1, ChatType: ChatTypePrivate, Text: "/admin confirm"}); err != nil {
 		t.Fatalf("second confirmation = %v", err)
+	}
+	if len(client.Sent) < 4 || !strings.Contains(client.Sent[len(client.Sent)-1].Text, "ожидающего подтверждения") {
+		t.Fatalf("sent = %#v", client.Sent)
+	}
+}
+
+func TestAdminPaymentConfirmationIncludesAuditDetailsAndPreservesDate(t *testing.T) {
+	client := &testutil.FakeTelegramClient{}
+	service := &fakeAdmin{}
+	admin := NewAdmin(client, service, &fakeAdminReminders{}, 1, LanguageEnglish)
+	now := time.Date(2026, time.September, 3, 9, 15, 27, 0, time.UTC)
+	admin.now = func() time.Time { return now }
+	note := "September subscription"
+	message := IncomingMessage{ChatID: 1, UserID: 1, ChatType: ChatTypePrivate}
+
+	if err := admin.BeginPayment(context.Background(), message, PaymentDraft{UserID: 7, AmountMinor: 25000, Note: &note}); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.Sent) != 1 {
+		t.Fatalf("sent = %#v", client.Sent)
+	}
+	for _, expected := range []string{"#7 User 7", "250.00 RUB", "2026-09-03 09:15 UTC", note, "/admin confirm", "/admin cancel"} {
+		if !strings.Contains(client.Sent[0].Text, expected) {
+			t.Fatalf("confirmation missing %q: %q", expected, client.Sent[0].Text)
+		}
+	}
+	if err := admin.ConfirmPayment(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	if service.paymentParams.OccurredAt == nil || !service.paymentParams.OccurredAt.Equal(now) {
+		t.Fatalf("payment occurred at = %#v", service.paymentParams.OccurredAt)
+	}
+	if len(client.Sent) != 2 || client.Sent[1].Text != "Payment recorded." {
+		t.Fatalf("sent = %#v", client.Sent)
+	}
+}
+
+func TestAdminExpectedErrorsAreAcknowledgedButInfrastructureErrorsRetry(t *testing.T) {
+	message := IncomingMessage{ChatID: 1, UserID: 1, ChatType: ChatTypePrivate, Text: "/admin pause 7"}
+	client := &testutil.FakeTelegramClient{}
+	service := &fakeAdmin{pauseErr: account.ErrInvalidUserStatusTransition}
+	bot := NewWithClient(client, service, LanguageEnglish)
+	if err := bot.EnableAdmin(1, &fakeAdminReminders{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := bot.HandleAdminCommand(context.Background(), message); err != nil {
+		t.Fatalf("expected business error returned: %v", err)
+	}
+	if len(client.Sent) != 1 || client.Sent[0].Text != "The action is not allowed in the current state." {
+		t.Fatalf("sent = %#v", client.Sent)
+	}
+
+	sentinel := errors.New("database unavailable")
+	client = &testutil.FakeTelegramClient{}
+	service = &fakeAdmin{pauseErr: sentinel}
+	bot = NewWithClient(client, service, LanguageEnglish)
+	if err := bot.EnableAdmin(1, &fakeAdminReminders{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := bot.HandleAdminCommand(context.Background(), message); !errors.Is(err, sentinel) {
+		t.Fatalf("infrastructure error = %v", err)
+	}
+	if len(client.Sent) != 0 {
+		t.Fatalf("unexpected response = %#v", client.Sent)
 	}
 }
 
@@ -131,7 +218,12 @@ func TestAdminManualReminderRequiresAdminAndUsesReminderService(t *testing.T) {
 	}
 }
 
-type fakeAdmin struct{ pauseCalls, paymentCalls int }
+type fakeAdmin struct {
+	pauseCalls, paymentCalls int
+	paymentErr               error
+	pauseErr                 error
+	paymentParams            account.AddPaymentParams
+}
 
 type fakeAdminQueries struct {
 	*fakeAdmin
@@ -169,10 +261,10 @@ func (f *fakeAdmin) LastLedgerEntries(context.Context, domain.UserID) ([]domain.
 	return nil, nil
 }
 func (f *fakeAdmin) CreateUser(context.Context, account.CreateUserParams) (domain.User, error) {
-	return domain.User{}, nil
+	return domain.User{ID: 8, DisplayName: "Created"}, nil
 }
 func (f *fakeAdmin) UserByID(_ context.Context, userID domain.UserID) (domain.User, error) {
-	return domain.User{ID: userID}, nil
+	return domain.User{ID: userID, DisplayName: "User " + strconv.FormatInt(int64(userID), 10), Currency: "RUB"}, nil
 }
 func (f *fakeAdmin) ListUsers(context.Context, account.UserFilter) ([]domain.User, error) {
 	return nil, nil
@@ -185,7 +277,7 @@ func (f *fakeAdmin) ChangeMonthlyFee(context.Context, account.ChangeMonthlyFeePa
 }
 func (f *fakeAdmin) Pause(context.Context, domain.UserID) (domain.User, error) {
 	f.pauseCalls++
-	return domain.User{}, nil
+	return domain.User{}, f.pauseErr
 }
 func (f *fakeAdmin) Resume(context.Context, account.ResumeParams) (domain.User, error) {
 	return domain.User{}, nil
@@ -193,9 +285,10 @@ func (f *fakeAdmin) Resume(context.Context, account.ResumeParams) (domain.User, 
 func (f *fakeAdmin) Disable(context.Context, domain.UserID) (domain.User, error) {
 	return domain.User{}, nil
 }
-func (f *fakeAdmin) AddPayment(context.Context, account.AddPaymentParams) (domain.LedgerEntry, error) {
+func (f *fakeAdmin) AddPayment(_ context.Context, params account.AddPaymentParams) (domain.LedgerEntry, error) {
 	f.paymentCalls++
-	return domain.LedgerEntry{}, nil
+	f.paymentParams = params
+	return domain.LedgerEntry{}, f.paymentErr
 }
 func (f *fakeAdmin) AddOpeningBalance(context.Context, account.AddOpeningBalanceParams) (domain.LedgerEntry, error) {
 	return domain.LedgerEntry{}, nil
@@ -213,8 +306,12 @@ type fakeAdminReminders struct {
 	text  string
 }
 
-func (f *fakeAdminReminders) DeliverManual(_ context.Context, user domain.User, text string) (bool, error) {
+func (f *fakeAdminReminders) DeliverManual(_ context.Context, user domain.User, _ int64, text string) (bool, error) {
 	f.calls++
 	f.user, f.text = user, text
+	return true, nil
+}
+
+func (f *fakeAdminReminders) ConfirmUnknownNotSent(context.Context, domain.UserID, domain.Date, domain.ReminderType) (bool, error) {
 	return true, nil
 }

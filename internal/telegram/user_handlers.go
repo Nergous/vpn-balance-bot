@@ -30,7 +30,10 @@ func (b *Bot) HandleStart(ctx context.Context, message IncomingMessage) error {
 			return b.send(ctx, message.ChatID, localized(b.language, "StartBound"))
 		}
 
-		return b.send(ctx, message.ChatID, inviteErrorText(b.language, err))
+		if text, known := inviteErrorText(b.language, err); known {
+			return b.send(ctx, message.ChatID, text)
+		}
+		return err
 	}
 
 	return b.send(ctx, message.ChatID, localized(b.language, "StartWelcome"))
@@ -44,7 +47,10 @@ func (b *Bot) HandleStatus(ctx context.Context, message IncomingMessage) error {
 
 	user, err := b.authenticatedUser(ctx, message.UserID, message.ChatID)
 	if err != nil {
-		return b.send(ctx, message.ChatID, localized(b.language, "UnlinkedStatus"))
+		if errors.Is(err, ErrUnauthorized) {
+			return b.send(ctx, message.ChatID, localized(b.language, "UnlinkedStatus"))
+		}
+		return err
 	}
 
 	balance, err := b.accounts.Balance(ctx, user.ID)
@@ -68,7 +74,10 @@ func (b *Bot) HandleHistory(ctx context.Context, message IncomingMessage) error 
 
 	user, err := b.authenticatedUser(ctx, message.UserID, message.ChatID)
 	if err != nil {
-		return b.send(ctx, message.ChatID, localized(b.language, "UnlinkedHistory"))
+		if errors.Is(err, ErrUnauthorized) {
+			return b.send(ctx, message.ChatID, localized(b.language, "UnlinkedHistory"))
+		}
+		return err
 	}
 
 	entries, err := b.accounts.LastLedgerEntries(ctx, user.ID)
@@ -84,22 +93,22 @@ func (b *Bot) HandleHelp(ctx context.Context, message IncomingMessage) error {
 	return b.send(ctx, message.ChatID, localized(b.language, "Help"))
 }
 
-func inviteErrorText(language localization.Language, err error) string {
+func inviteErrorText(language localization.Language, err error) (string, bool) {
 	switch {
 	case errors.Is(err, account.ErrInviteExpired):
-		return localized(language, "InviteExpired")
+		return localized(language, "InviteExpired"), true
 
 	case errors.Is(err, account.ErrInviteAlreadyUsed):
-		return localized(language, "InviteUsed")
+		return localized(language, "InviteUsed"), true
 
 	case errors.Is(err, account.ErrInviteNotFound), errors.Is(err, account.ErrInvalidInviteToken):
-		return localized(language, "InviteInvalid")
+		return localized(language, "InviteInvalid"), true
 
 	case errors.Is(err, account.ErrTelegramUserIDTaken), errors.Is(err, account.ErrTelegramChatIDTaken):
-		return localized(language, "InviteTaken")
+		return localized(language, "InviteTaken"), true
 
 	default:
-		return localized(language, "InviteError")
+		return "", false
 	}
 }
 
@@ -131,21 +140,25 @@ func formatStatus(
 	state := localized(language, "StatusZero")
 
 	if balance < 0 {
-		state = localized(language, "StatusDebt", amountMessageData{Amount: -balance, Currency: user.Currency})
+		state = localized(language, "StatusDebt", amountMessageData{Amount: formatAmountMinor(-balance), Currency: user.Currency})
 	}
 
 	if balance > 0 {
-		state = localized(language, "StatusPrepayment", amountMessageData{Amount: balance, Currency: user.Currency})
+		state = localized(language, "StatusPrepayment", amountMessageData{
+			Amount:         formatAmountMinor(balance),
+			Currency:       user.Currency,
+			CoveredPeriods: balance.Int64() / user.MonthlyFeeMinor.Int64(),
+		})
 	}
 
 	text := localized(language, "Status", statusMessageData{
-		Name: user.DisplayName, Fee: user.MonthlyFeeMinor, Currency: user.Currency,
+		Name: user.DisplayName, Fee: formatAmountMinor(user.MonthlyFeeMinor), Currency: user.Currency,
 		NextCharge: user.NextChargeOn, Balance: state,
 	})
 
 	if hasLastPayment {
 		return text + localized(language, "LastPayment", amountMessageData{
-			Amount:   lastPayment.AmountMinor,
+			Amount:   formatAmountMinor(lastPayment.AmountMinor),
 			Currency: user.Currency,
 		})
 	}
@@ -165,7 +178,7 @@ func formatHistory(language localization.Language, entries []domain.LedgerEntry)
 			note = " — " + *entry.Note
 		}
 
-		lines = append(lines, fmt.Sprintf("%s · %s · %+d%s", entry.OccurredAt.Format("2006-01-02"), entry.Kind, entry.AmountMinor, note))
+		lines = append(lines, fmt.Sprintf("%s · %s · %s %s%s", entry.OccurredAt.Format("2006-01-02"), entry.Kind, formatSignedAmountMinor(entry.AmountMinor), "RUB", note))
 	}
 
 	return strings.Join(lines, "\n")

@@ -54,7 +54,7 @@ func TestStartInviteAndOwnStatus(t *testing.T) {
 	if err := bot.HandleStatus(context.Background(), IncomingMessage{ChatID: 22, UserID: 11, ChatType: ChatTypePrivate, Username: "another-name"}); err != nil {
 		t.Fatal(err)
 	}
-	if len(client.Sent) != 2 || !strings.Contains(client.Sent[1].Text, "Долг: 25000 RUB") || !strings.Contains(client.Sent[1].Text, "Alice") {
+	if len(client.Sent) != 2 || !strings.Contains(client.Sent[1].Text, "Долг: 250.00 RUB") || !strings.Contains(client.Sent[1].Text, "Alice") {
 		t.Fatalf("sent = %#v", client.Sent)
 	}
 }
@@ -91,6 +91,19 @@ func TestUserMessagesCanBeEnglish(t *testing.T) {
 	}
 }
 
+func TestUserHandlersDoNotMaskDatabaseErrorsAsUnlinked(t *testing.T) {
+	sentinel := errors.New("database unavailable")
+	client := &testutil.FakeTelegramClient{}
+	service := &fakeAccount{byTelegram: func(context.Context, int64) (domain.User, error) { return domain.User{}, sentinel }}
+	bot := NewWithClient(client, service, LanguageEnglish)
+	if err := bot.HandleStatus(context.Background(), IncomingMessage{ChatID: 1, UserID: 1, ChatType: ChatTypePrivate}); !errors.Is(err, sentinel) {
+		t.Fatalf("HandleStatus() error = %v", err)
+	}
+	if len(client.Sent) != 0 {
+		t.Fatalf("unexpected response = %#v", client.Sent)
+	}
+}
+
 func TestFormatStatusUsesTypedTemplateData(t *testing.T) {
 	nextCharge, err := domain.NewDate(2026, time.September, 1)
 	if err != nil {
@@ -99,7 +112,20 @@ func TestFormatStatusUsesTypedTemplateData(t *testing.T) {
 	got := formatStatus(LanguageEnglish, domain.User{
 		DisplayName: "Alice", MonthlyFeeMinor: 100000, Currency: "RUB", NextChargeOn: nextCharge,
 	}, -25000, domain.LedgerEntry{}, false)
-	if !strings.Contains(got, "Debt: 25000 RUB") || !strings.Contains(got, "Fee: 100000 RUB") {
+	if !strings.Contains(got, "Debt: 250.00 RUB") || !strings.Contains(got, "Fee: 1000.00 RUB") {
+		t.Fatalf("status = %q", got)
+	}
+}
+
+func TestFormatStatusReportsFullChargesCoveredByPrepayment(t *testing.T) {
+	nextCharge, err := domain.NewDate(2026, time.September, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := formatStatus(LanguageEnglish, domain.User{
+		DisplayName: "Alice", MonthlyFeeMinor: 100000, Currency: "RUB", NextChargeOn: nextCharge,
+	}, 250000, domain.LedgerEntry{}, false)
+	if !strings.Contains(got, "Prepayment: 2500.00 RUB") || !strings.Contains(got, "covers 2 full charges") {
 		t.Fatalf("status = %q", got)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"strings"
+	"time"
 
 	"github.com/Nergous/vpn-balance-bot/internal/domain"
 )
@@ -29,7 +30,11 @@ func (s *Service) AddPayment(ctx context.Context, params AddPaymentParams) (doma
 		return domain.LedgerEntry{}, ErrInvalidAdminTelegramID
 	}
 
-	return s.createManualLedgerEntry(ctx, params.UserID, domain.LedgerKindPayment, params.AmountMinor, params.AdminTelegramID, params.Note)
+	occurredAt := s.nowUTC()
+	if params.OccurredAt != nil && !params.OccurredAt.IsZero() {
+		occurredAt = params.OccurredAt.UTC()
+	}
+	return s.createManualLedgerEntryAt(ctx, params.UserID, domain.LedgerKindPayment, params.AmountMinor, params.AdminTelegramID, params.Note, occurredAt)
 }
 
 // AddAdjustment records a signed correction with a mandatory note.
@@ -85,15 +90,23 @@ func (s *Service) LastUnreversedPayment(ctx context.Context, userID domain.UserI
 
 func (s *Service) createManualLedgerEntry(ctx context.Context, userID domain.UserID, kind domain.LedgerKind, amount domain.AmountMinor, adminTelegramID int64, note *string) (domain.LedgerEntry, error) {
 	now := s.nowUTC()
+	return s.createManualLedgerEntryWithTimes(ctx, userID, kind, amount, adminTelegramID, note, now, now)
+}
+
+func (s *Service) createManualLedgerEntryAt(ctx context.Context, userID domain.UserID, kind domain.LedgerKind, amount domain.AmountMinor, adminTelegramID int64, note *string, occurredAt time.Time) (domain.LedgerEntry, error) {
+	return s.createManualLedgerEntryWithTimes(ctx, userID, kind, amount, adminTelegramID, note, occurredAt.UTC(), s.nowUTC())
+}
+
+func (s *Service) createManualLedgerEntryWithTimes(ctx context.Context, userID domain.UserID, kind domain.LedgerKind, amount domain.AmountMinor, adminTelegramID int64, note *string, occurredAt, createdAt time.Time) (domain.LedgerEntry, error) {
 	adminID := adminTelegramID
 	return s.storage.CreateLedgerEntry(ctx, domain.LedgerEntry{
 		UserID:              userID,
 		Kind:                kind,
 		AmountMinor:         amount,
-		OccurredAt:          now,
+		OccurredAt:          occurredAt,
 		CreatedByTelegramID: &adminID,
 		Note:                note,
-		CreatedAt:           now,
+		CreatedAt:           createdAt,
 	})
 }
 

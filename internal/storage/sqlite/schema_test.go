@@ -169,15 +169,15 @@ func TestSchemaPreventsDuplicateReminderDeliveries(t *testing.T) {
 
 	if _, err := store.db.ExecContext(ctx, `
 		INSERT INTO reminder_deliveries (
-			user_id, billing_date, reminder_type, scheduled_date, status, created_at, updated_at
-		) VALUES (1, '2026-08-28', 'manual', '2026-08-28', 'pending', 1, 1)
+			user_id, billing_date, reminder_type, scheduled_date, status, created_at, updated_at, lease_expires_at
+		) VALUES (1, '2026-08-28', 'manual', '2026-08-28', 'pending', 1, 1, 10)
 	`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.db.ExecContext(ctx, `
 		INSERT INTO reminder_deliveries (
-			user_id, billing_date, reminder_type, scheduled_date, status, created_at, updated_at
-		) VALUES (1, '2026-08-28', 'manual', '2026-08-29', 'pending', 2, 2)
+			user_id, billing_date, reminder_type, scheduled_date, status, created_at, updated_at, lease_expires_at
+		) VALUES (1, '2026-08-28', 'manual', '2026-08-29', 'pending', 2, 2, 10)
 	`); err == nil {
 		t.Fatal("duplicate reminder delivery was accepted")
 	}

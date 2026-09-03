@@ -7,13 +7,13 @@ import (
 	"github.com/Nergous/vpn-balance-bot/internal/domain"
 )
 
-const defaultMaxChargesPerRun = 100
+const defaultChargeBatchSize = 100
 
 // Service performs idempotent subscription billing catch-up.
 type Service struct {
-	storage          Storage
-	now              func() time.Time
-	maxChargesPerRun int
+	storage         Storage
+	now             func() time.Time
+	chargeBatchSize int
 }
 
 // New creates a billing service backed by storage.
@@ -27,9 +27,9 @@ func New(storage Storage) (*Service, error) {
 
 func newService(storage Storage, now func() time.Time) *Service {
 	return &Service{
-		storage:          storage,
-		now:              now,
-		maxChargesPerRun: defaultMaxChargesPerRun,
+		storage:         storage,
+		now:             now,
+		chargeBatchSize: defaultChargeBatchSize,
 	}
 }
 
@@ -42,12 +42,7 @@ func (s *Service) CatchUp(ctx context.Context, asOf domain.Date) (int, error) {
 
 	chargesCreated := 0
 	for {
-		remaining := s.maxChargesPerRun - chargesCreated
-		if remaining <= 0 {
-			return chargesCreated, ErrCatchUpLimitReached
-		}
-
-		users, err := s.storage.UsersDueForCharge(ctx, asOf, remaining)
+		users, err := s.storage.UsersDueForCharge(ctx, asOf, s.chargeBatchSize)
 		if err != nil {
 			return chargesCreated, err
 		}
@@ -72,9 +67,6 @@ func (s *Service) CatchUp(ctx context.Context, asOf domain.Date) (int, error) {
 			if created {
 				chargesCreated++
 				madeProgress = true
-				if chargesCreated == s.maxChargesPerRun {
-					return chargesCreated, ErrCatchUpLimitReached
-				}
 			}
 		}
 

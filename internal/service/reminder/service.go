@@ -11,11 +11,21 @@ import (
 )
 
 var (
-	ErrNilStorage = errors.New("reminder storage is nil")
-	ErrNilSender  = errors.New("reminder sender is nil")
+	ErrNilStorage           = errors.New("reminder storage is nil")
+	ErrNilSender            = errors.New("reminder sender is nil")
+	ErrStaleDeliveryAttempt = errors.New("reminder delivery attempt is stale")
 )
 
-const maxDeliveryAttempts = 3
+const (
+	maxDeliveryAttempts = 3
+	deliveryLease       = 2 * time.Minute
+	candidatePageSize   = 100
+	deliveryWorkers     = 4
+)
+
+type pagedStorage interface {
+	ReminderCandidatesPage(context.Context, domain.Date, domain.UserID, int) ([]Candidate, bool, error)
+}
 
 // Service selects, reserves, and delivers customer reminders.
 type Service struct {
@@ -47,79 +57,138 @@ func New(storage Storage, sender Sender, language localization.Language) (*Servi
 	}, nil
 }
 
-// RecoverPending marks deliveries left pending by a prior process as unknown.
+// RecoverPending marks every delivery left pending by a prior process as
+// unknown. The application is intentionally single-process, so no active
+// delivery can belong to another live owner during startup.
 func (s *Service) RecoverPending(ctx context.Context) (int, error) {
-	return s.storage.MarkPendingUnknown(ctx, s.now().UTC().Truncate(time.Second))
+	return s.storage.MarkAllPendingUnknown(ctx, s.now().UTC().Truncate(time.Second))
 }
 
-// Process recovers interrupted deliveries and sends the one automatic reminder
-// applicable to each active user for today. Delivery reservation makes retries safe.
+// Process sends the one automatic reminder applicable to each active user for today.
 func (s *Service) Process(ctx context.Context, today domain.Date) (int, error) {
 	if !today.IsValid() {
 		return 0, domain.ErrInvalidDate
 	}
-
-	if _, err := s.RecoverPending(ctx); err != nil {
-		return 0, fmt.Errorf("recover pending reminder deliveries: %w", err)
-	}
-
-	candidates, err := s.storage.ReminderCandidates(ctx, today)
-	if err != nil {
-		return 0, fmt.Errorf("list reminder candidates: %w", err)
+	if _, err := s.storage.MarkPendingUnknown(ctx, s.now().UTC().Truncate(time.Second)); err != nil {
+		return 0, fmt.Errorf("recover expired reminder deliveries: %w", err)
 	}
 
 	delivered := 0
 	var processErrors []error
-
-	for _, candidate := range candidates {
-		reminderType, billingDate, ok := SelectAutomatic(candidate, today)
-		if !ok {
-			continue
+	if storage, ok := s.storage.(pagedStorage); ok {
+		var afterID domain.UserID
+		for {
+			candidates, hasMore, err := storage.ReminderCandidatesPage(ctx, today, afterID, candidatePageSize)
+			if err != nil {
+				return delivered, fmt.Errorf("list reminder candidates: %w", err)
+			}
+			count, errs := s.processCandidates(ctx, today, candidates, deliveryWorkers)
+			delivered += count
+			processErrors = append(processErrors, errs...)
+			if !hasMore || len(candidates) == 0 {
+				break
+			}
+			afterID = candidates[len(candidates)-1].User.ID
 		}
-
-		created, err := s.Deliver(ctx, candidate.User, billingDate, today, reminderType, automaticText(s.language, reminderType))
+	} else {
+		candidates, err := s.storage.ReminderCandidates(ctx, today)
 		if err != nil {
-			processErrors = append(processErrors, fmt.Errorf("deliver %s reminder to user %d: %w", reminderType, candidate.User.ID, err))
-			continue
+			return 0, fmt.Errorf("list reminder candidates: %w", err)
 		}
-
-		if created {
-			delivered++
-		}
+		count, errs := s.processCandidates(ctx, today, candidates, 1)
+		delivered += count
+		processErrors = append(processErrors, errs...)
 	}
 
 	return delivered, errors.Join(processErrors...)
 }
 
+type deliveryResult struct {
+	delivered bool
+	err       error
+}
+
+func (s *Service) processCandidates(ctx context.Context, today domain.Date, candidates []Candidate, maxWorkers int) (int, []error) {
+	jobs := make(chan Candidate)
+	results := make(chan deliveryResult, len(candidates))
+	workers := min(maxWorkers, len(candidates))
+	for range workers {
+		go func() {
+			for candidate := range jobs {
+				reminderType, billingDate, ok := SelectAutomatic(candidate, today)
+				if !ok {
+					results <- deliveryResult{}
+					continue
+				}
+				created, err := s.Deliver(ctx, candidate.User, billingDate, today, reminderType, automaticText(s.language, reminderType))
+				if err != nil {
+					err = fmt.Errorf("deliver %s reminder to user %d: %w", reminderType, candidate.User.ID, err)
+				}
+				results <- deliveryResult{delivered: created, err: err}
+			}
+		}()
+	}
+	for _, candidate := range candidates {
+		jobs <- candidate
+	}
+	close(jobs)
+	delivered := 0
+	var processErrors []error
+	for range candidates {
+		result := <-results
+		if result.delivered {
+			delivered++
+		}
+		if result.err != nil {
+			processErrors = append(processErrors, result.err)
+		}
+	}
+	return delivered, processErrors
+}
+
 // DeliverManual sends an explicit admin-requested reminder through the same
 // reservation and result-recording path as automatic deliveries.
-func (s *Service) DeliverManual(ctx context.Context, user domain.User, text string) (bool, error) {
+func (s *Service) DeliverManual(ctx context.Context, user domain.User, updateID int64, text string) (bool, error) {
 	today, err := domain.DateFromTime(s.now().UTC(), time.UTC)
 	if err != nil {
 		return false, err
 	}
 
-	return s.Deliver(ctx, user, user.NextChargeOn, today, domain.ReminderTypeManual, text)
+	return s.deliver(ctx, user, user.NextChargeOn, today, domain.ReminderTypeManual, fmt.Sprintf("update:%d", updateID), text)
 }
 
 // Deliver reserves exactly one delivery key before sending it.
 func (s *Service) Deliver(ctx context.Context, user domain.User, billingDate, scheduledDate domain.Date, reminderType domain.ReminderType, text string) (bool, error) {
+	return s.deliver(ctx, user, billingDate, scheduledDate, reminderType, "", text)
+}
+
+func (s *Service) deliver(ctx context.Context, user domain.User, billingDate, scheduledDate domain.Date, reminderType domain.ReminderType, deliveryKey, text string) (bool, error) {
 	if user.TelegramChatID == nil {
 		return false, nil
 	}
 
 	now := s.now().UTC().Truncate(time.Second)
+	leaseExpiresAt := now.Add(deliveryLease)
 	delivery, attempt, reserved, err := s.storage.ReserveReminderDelivery(ctx, domain.ReminderDelivery{
-		UserID:        user.ID,
-		BillingDate:   billingDate,
-		ScheduledDate: scheduledDate,
-		ReminderType:  reminderType,
-		Status:        domain.ReminderStatusPending,
-		CreatedAt:     now,
-		UpdatedAt:     now,
+		UserID:         user.ID,
+		BillingDate:    billingDate,
+		ScheduledDate:  scheduledDate,
+		ReminderType:   reminderType,
+		DeliveryKey:    deliveryKey,
+		Status:         domain.ReminderStatusPending,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+		LeaseExpiresAt: &leaseExpiresAt,
 	}, maxDeliveryAttempts)
-	if err != nil || !reserved {
+	if err != nil {
 		return false, err
+	}
+	if !reserved {
+		if delivery.Status == domain.ReminderStatusFailed && delivery.ErrorCode != nil &&
+			*delivery.ErrorCode == string(DeliveryErrorRetryable) && attempt < maxDeliveryAttempts {
+			return false, ErrRetryableDelivery
+		}
+		return false, nil
 	}
 
 	messageID, err := s.sender.SendReminder(ctx, *user.TelegramChatID, text)
@@ -135,7 +204,10 @@ func (s *Service) Deliver(ctx context.Context, user domain.User, billingDate, sc
 			retryAt = &nextAttempt
 		}
 
-		updateErr := s.storage.UpdateReminderDeliveryAttempt(ctx, delivery, retryAt)
+		updated, updateErr := s.storage.UpdateReminderDeliveryAttempt(ctx, delivery, attempt, retryAt)
+		if updateErr == nil && !updated {
+			updateErr = ErrStaleDeliveryAttempt
+		}
 		resultErr := err
 		if retryAt != nil {
 			resultErr = errors.Join(resultErr, ErrRetryableDelivery)
@@ -152,8 +224,12 @@ func (s *Service) Deliver(ctx context.Context, user domain.User, billingDate, sc
 	telegramMessageID := int64(messageID)
 	delivery.TelegramMessageID = &telegramMessageID
 	delivery.UpdatedAt = now
-	if err := s.storage.UpdateReminderDeliveryAttempt(ctx, delivery, nil); err != nil {
+	updated, err := s.storage.UpdateReminderDeliveryAttempt(ctx, delivery, attempt, nil)
+	if err != nil {
 		return false, err
+	}
+	if !updated {
+		return false, ErrStaleDeliveryAttempt
 	}
 
 	return true, nil

@@ -18,7 +18,7 @@ func (s *Store) UsersDueForCharge(ctx context.Context, asOf domain.Date, limit i
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.runner(ctx).QueryContext(ctx, `
 		SELECT `+userColumns+`
 		FROM users
 		WHERE status = ? AND next_charge_on <= ?
@@ -55,70 +55,67 @@ func (s *Store) ReserveSubscriptionCharge(ctx context.Context, params billing.Re
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return domain.LedgerEntry{}, false, fmt.Errorf("start subscription charge transaction: %w", err)
-	}
-
-	defer tx.Rollback()
-
-	user, err := scanUser(tx.QueryRowContext(ctx, `SELECT `+userColumns+` FROM users WHERE id = ?`, params.UserID))
-	if errors.Is(err, sql.ErrNoRows) {
-		return domain.LedgerEntry{}, false, nil
-	}
-
-	if err != nil {
-		return domain.LedgerEntry{}, false, fmt.Errorf("read billing user: %w", err)
-	}
-
-	if user.Status != domain.UserStatusActive || user.NextChargeOn != params.BillingPeriodOn {
-		return domain.LedgerEntry{}, false, nil
-	}
-
-	nextChargeOn, err := user.NextChargeOn.NextBillingDate(user.BillingAnchorDay)
-	if err != nil {
-		return domain.LedgerEntry{}, false, fmt.Errorf("calculate next charge date: %w", err)
-	}
-
-	billingPeriodOn := user.NextChargeOn
-	entry, err := insertLedgerEntry(ctx, tx, domain.LedgerEntry{
-		UserID:          user.ID,
-		Kind:            domain.LedgerKindSubscriptionCharge,
-		AmountMinor:     -user.MonthlyFeeMinor,
-		OccurredAt:      params.OccurredAt,
-		BillingPeriodOn: &billingPeriodOn,
-		CreatedAt:       params.UpdatedAt,
-	})
-
-	if err != nil {
-		if isSubscriptionChargeConflict(err) {
-			return domain.LedgerEntry{}, false, nil
+	var entry domain.LedgerEntry
+	created := false
+	err := s.withTransaction(ctx, "subscription charge", func(txCtx context.Context, tx *sql.Tx) error {
+		user, err := scanUser(tx.QueryRowContext(txCtx, `SELECT `+userColumns+` FROM users WHERE id = ?`, params.UserID))
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
 		}
 
-		return domain.LedgerEntry{}, false, err
-	}
+		if err != nil {
+			return fmt.Errorf("read billing user: %w", err)
+		}
 
-	result, err := tx.ExecContext(ctx, `
+		if user.Status != domain.UserStatusActive || user.NextChargeOn != params.BillingPeriodOn {
+			return nil
+		}
+
+		nextChargeOn, err := user.NextChargeOn.NextBillingDate(user.BillingAnchorDay)
+		if err != nil {
+			return fmt.Errorf("calculate next charge date: %w", err)
+		}
+		if err := ensureBalanceRange(txCtx, tx, user.ID, -user.MonthlyFeeMinor); err != nil {
+			return err
+		}
+
+		billingPeriodOn := user.NextChargeOn
+		entry, err = insertLedgerEntry(txCtx, tx, domain.LedgerEntry{
+			UserID:          user.ID,
+			Kind:            domain.LedgerKindSubscriptionCharge,
+			AmountMinor:     -user.MonthlyFeeMinor,
+			OccurredAt:      params.OccurredAt,
+			BillingPeriodOn: &billingPeriodOn,
+			CreatedAt:       params.UpdatedAt,
+		})
+
+		if err != nil {
+			if isSubscriptionChargeConflict(err) {
+				return nil
+			}
+
+			return err
+		}
+
+		result, err := tx.ExecContext(txCtx, `
 		UPDATE users SET next_charge_on = ?, updated_at = ? WHERE id = ?
 	`, nextChargeOn.String(), params.UpdatedAt.UTC().Unix(), user.ID)
-	if err != nil {
-		return domain.LedgerEntry{}, false, fmt.Errorf("advance next charge date: %w", err)
-	}
+		if err != nil {
+			return fmt.Errorf("advance next charge date: %w", err)
+		}
 
-	updated, err := result.RowsAffected()
-	if err != nil {
-		return domain.LedgerEntry{}, false, fmt.Errorf("check next charge date update: %w", err)
-	}
+		updated, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("check next charge date update: %w", err)
+		}
 
-	if updated != 1 {
-		return domain.LedgerEntry{}, false, fmt.Errorf("advance next charge date: unexpected updated rows %d", updated)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return domain.LedgerEntry{}, false, fmt.Errorf("commit subscription charge transaction: %w", err)
-	}
-
-	return entry, true, nil
+		if updated != 1 {
+			return fmt.Errorf("advance next charge date: unexpected updated rows %d", updated)
+		}
+		created = true
+		return nil
+	})
+	return entry, created, err
 }
 
 func isSubscriptionChargeConflict(err error) bool {

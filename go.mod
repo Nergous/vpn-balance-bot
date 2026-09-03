@@ -6,7 +6,7 @@ require (
 	github.com/go-telegram/bot v1.24.0
 	github.com/joho/godotenv v1.5.1
 	github.com/nicksnyder/go-i18n/v2 v2.6.1
-	golang.org/x/text v0.32.0
+	golang.org/x/text v0.39.0
 	modernc.org/sqlite v1.57.0
 )
 

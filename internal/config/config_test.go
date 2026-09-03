@@ -38,6 +38,7 @@ func TestLoadAndMustLoad(t *testing.T) {
 
 func TestLoadProduction(t *testing.T) {
 	setBaseEnvironment(t, EnvProduction)
+	setTelegramResponse(t, http.StatusOK, "{\"ok\":true}")
 	t.Setenv("TELEGRAM_BOT_TOKEN", "production-token")
 	t.Setenv("DATABASE_PATH", "/var/lib/vpn-balance-bot/bot.db")
 	t.Setenv("APP_TIMEZONE", "UTC")
@@ -48,6 +49,31 @@ func TestLoadProduction(t *testing.T) {
 	if err != nil || cfg.AppEnv != EnvProduction || cfg.ReminderHour != 4 ||
 		cfg.InviteTTL != 24*time.Hour || cfg.LogLevel != DebugLevel {
 		t.Fatalf("Load() = %+v, %v", cfg, err)
+	}
+}
+
+func TestLoadProductionRejectsInvalidTelegramToken(t *testing.T) {
+	setBaseEnvironment(t, EnvProduction)
+	t.Setenv("DATABASE_PATH", "/var/lib/vpn-balance-bot/bot.db")
+	setTelegramResponse(t, http.StatusUnauthorized, "{\"ok\":false,\"error_code\":401}")
+	if _, err := Load(context.Background()); !errors.Is(err, ErrTelegramBotTokenIsInvalid) {
+		t.Fatalf("Load() error = %v", err)
+	}
+}
+
+func TestLoadForMaintenanceSkipsTelegramNetworkValidation(t *testing.T) {
+	clearConfigEnvironment(t)
+	t.Setenv("APP_ENV", EnvProduction)
+	t.Setenv("DATABASE_PATH", "/var/lib/vpn-balance-bot/bot.db")
+	setTelegramRoundTripper(t, func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("Telegram must not be contacted")
+	})
+	cfg, err := LoadForMaintenance(context.Background())
+	if err != nil {
+		t.Fatalf("LoadForMaintenance() error = %v", err)
+	}
+	if cfg.TelegramBotToken != "" || cfg.AdminTelegramID != 0 {
+		t.Fatalf("maintenance config loaded Telegram settings: %+v", cfg)
 	}
 }
 
@@ -80,6 +106,7 @@ func TestLoadErrors(t *testing.T) {
 func TestLoadDevelopmentEnvironment(t *testing.T) {
 	t.Chdir(t.TempDir())
 	unsetEnv(t, "APP_ENV")
+	setTelegramResponse(t, http.StatusOK, "{\"ok\":true}")
 	if err := os.WriteFile(".env", []byte("APP_ENV=development\nTELEGRAM_BOT_TOKEN=dev-token\nADMIN_TELEGRAM_ID=123\nDATABASE_PATH=data/dev.db\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -153,10 +180,15 @@ func TestValidateConfig(t *testing.T) {
 		TelegramBotToken: "token", AdminTelegramID: 1, DatabasePath: "data/bot.db",
 		AppTimezone: "UTC", ReminderHour: 9, InviteTTL: time.Hour,
 		LogLevel: InfoLevel, AppEnv: EnvTest, BotLanguage: BotLanguageRussian,
-		HTTPTimeout: time.Second, DBTimeout: time.Second,
+		HTTPTimeout: 2 * time.Second, DBTimeout: time.Second,
 	}
 	if err := validateConfig(valid); err != nil {
 		t.Fatal(err)
+	}
+	subsecondInvite := *valid
+	subsecondInvite.InviteTTL = 500 * time.Millisecond
+	if !errors.Is(validateConfig(&subsecondInvite), ErrInvalidInviteTTL) {
+		t.Fatal("subsecond invite TTL was accepted")
 	}
 	invalid := *valid
 	invalid.TelegramBotToken = ""
@@ -216,6 +248,7 @@ func TestLoadRejectsNonPositiveTimeouts(t *testing.T) {
 		want  error
 	}{
 		{name: "zero HTTP timeout", key: "HTTP_TIMEOUT", value: "0s", want: ErrInvalidHTTPTimeout},
+		{name: "sub-two-second HTTP timeout", key: "HTTP_TIMEOUT", value: "1500ms", want: ErrInvalidHTTPTimeout},
 		{name: "negative DB timeout", key: "DB_TIMEOUT", value: "-1s", want: ErrInvalidDBTimeout},
 	} {
 		t.Run(test.name, func(t *testing.T) {

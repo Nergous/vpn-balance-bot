@@ -59,7 +59,7 @@ func TestCatchUpRepeatsUntilNoPeriodsDue(t *testing.T) {
 	}
 }
 
-func TestCatchUpStopsAtLimitAndContinuesIdempotently(t *testing.T) {
+func TestCatchUpProcessesBacklogAcrossBatches(t *testing.T) {
 	periods := []domain.Date{
 		testDate(t, 2026, time.January, 31),
 		testDate(t, 2026, time.February, 28),
@@ -85,16 +85,11 @@ func TestCatchUpStopsAtLimitAndContinuesIdempotently(t *testing.T) {
 		},
 	}
 	service := newService(storage, time.Now)
-	service.maxChargesPerRun = 2
+	service.chargeBatchSize = 2
 
 	created, err := service.CatchUp(context.Background(), periods[len(periods)-1])
-	if created != 2 || !errors.Is(err, ErrCatchUpLimitReached) {
-		t.Fatalf("first CatchUp() = %d, %v", created, err)
-	}
-
-	created, err = service.CatchUp(context.Background(), periods[len(periods)-1])
-	if created != 1 || err != nil {
-		t.Fatalf("continued CatchUp() = %d, %v", created, err)
+	if created != 3 || err != nil {
+		t.Fatalf("CatchUp() = %d, %v", created, err)
 	}
 
 	created, err = service.CatchUp(context.Background(), periods[len(periods)-1])

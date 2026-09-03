@@ -53,6 +53,7 @@ type ReminderDelivery struct {
 	UserID            UserID
 	BillingDate       Date
 	ReminderType      ReminderType
+	DeliveryKey       string
 	ScheduledDate     Date
 	Status            ReminderStatus
 	SentAt            *time.Time
@@ -60,4 +61,6 @@ type ReminderDelivery struct {
 	ErrorCode         *string
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
+	AttemptCount      int
+	LeaseExpiresAt    *time.Time
 }

@@ -139,6 +139,7 @@ func TestListUsersWithOptionalStatus(t *testing.T) {
 func TestListUsersPageAndStatusCounts(t *testing.T) {
 	store := testutil.NewSQLite(t)
 	ctx := context.Background()
+	now := time.Date(2026, time.September, 3, 10, 0, 0, 0, time.UTC)
 	statuses := []domain.UserStatus{
 		domain.UserStatusActive,
 		domain.UserStatusPaused,
@@ -146,10 +147,45 @@ func TestListUsersPageAndStatusCounts(t *testing.T) {
 		domain.UserStatusActive,
 		domain.UserStatusPaused,
 	}
+	users := make([]domain.User, 0, len(statuses))
 	for index, status := range statuses {
-		if _, err := store.CreateUser(ctx, newUser(t, index+1, status)); err != nil {
+		user := newUser(t, index+1, status)
+		if index == len(statuses)-1 {
+			user.TelegramUserID = nil
+			user.TelegramChatID = nil
+		}
+		created, err := store.CreateUser(ctx, user)
+		if err != nil {
 			t.Fatal(err)
 		}
+		users = append(users, created)
+	}
+	for _, entry := range []domain.LedgerEntry{
+		{UserID: users[0].ID, Kind: domain.LedgerKindAdjustment, AmountMinor: -100, OccurredAt: now, CreatedAt: now},
+		{UserID: users[3].ID, Kind: domain.LedgerKindPayment, AmountMinor: 200000, OccurredAt: now, CreatedAt: now},
+	} {
+		if _, err := store.CreateLedgerEntry(ctx, entry); err != nil {
+			t.Fatal(err)
+		}
+	}
+	billingDate, err := domain.NewDate(2026, time.September, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivery := domain.ReminderDelivery{
+		UserID: users[0].ID, BillingDate: billingDate, ScheduledDate: billingDate,
+		ReminderType: domain.ReminderTypeManual, Status: domain.ReminderStatusPending,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if _, created, err := store.CreateReminderDelivery(ctx, delivery); err != nil || !created {
+		t.Fatalf("CreateReminderDelivery() = %t, %v", created, err)
+	}
+	unreachable := "unreachable"
+	delivery.Status = domain.ReminderStatusFailed
+	delivery.ErrorCode = &unreachable
+	delivery.UpdatedAt = now.Add(time.Second)
+	if err := store.UpdateReminderDelivery(ctx, delivery); err != nil {
+		t.Fatal(err)
 	}
 
 	page, hasMore, err := store.ListUsersPage(ctx, nil, 1, 2)
@@ -172,7 +208,10 @@ func TestListUsersPageAndStatusCounts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := account.UserStatusCounts{Total: 5, Active: 2, Paused: 2, Disabled: 1}
+	want := account.UserStatusCounts{
+		Total: 5, Active: 2, Paused: 2, Disabled: 1,
+		Debtors: 1, Insufficient: 1, Unlinked: 1, Unreachable: 1,
+	}
 	if counts != want {
 		t.Fatalf("counts=%#v want=%#v", counts, want)
 	}
