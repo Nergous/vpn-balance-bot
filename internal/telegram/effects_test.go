@@ -86,6 +86,21 @@ func TestNewRejectsHTTPTimeoutThatDisablesLongPolling(t *testing.T) {
 	}
 }
 
+func TestUpdateFailurePolicyBoundsTransientRetriesAndDropsPermanentErrors(t *testing.T) {
+	bot := NewWithClient(&transactionAwareClient{}, &fakeAdmin{}, LanguageEnglish)
+	client := &productionClient{adapter: bot, updateAttempts: make(map[int64]int)}
+	transient := errors.New("database unavailable")
+	if client.acknowledgeFailedUpdate(42, transient) || client.acknowledgeFailedUpdate(42, transient) {
+		t.Fatal("transient update acknowledged before retry limit")
+	}
+	if !client.acknowledgeFailedUpdate(42, transient) {
+		t.Fatal("transient update was not acknowledged after retry limit")
+	}
+	if !client.acknowledgeFailedUpdate(43, ErrPrivateChatRequired) {
+		t.Fatal("permanent update error was retried")
+	}
+}
+
 type recordingUpdateProcessor struct {
 	*fakeAdmin
 	process       bool

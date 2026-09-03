@@ -31,7 +31,7 @@ func TestCreateInviteTokenStoresOnlyHash(t *testing.T) {
 	}
 	service := newService(storage, 24*time.Hour, func() time.Time { return now })
 
-	token, err := service.CreateInviteToken(context.Background(), 7)
+	token, err := service.CreateInviteToken(context.Background(), CreateInviteTokenParams{AdminTelegramID: 1, UserID: 7})
 	if err != nil {
 		t.Fatalf("CreateInviteToken() error = %v", err)
 	}
@@ -46,6 +46,13 @@ func TestCreateInviteTokenStoresOnlyHash(t *testing.T) {
 	}
 	if stored.UserID != 7 || !stored.CreatedAt.Equal(now) || !stored.ExpiresAt.Equal(now.Add(24*time.Hour)) {
 		t.Fatalf("stored record = %#v", stored)
+	}
+}
+
+func TestCreateInviteTokenRejectsMissingAdminActor(t *testing.T) {
+	service := newService(&fakeStorage{}, time.Hour, time.Now)
+	if _, err := service.CreateInviteToken(context.Background(), CreateInviteTokenParams{UserID: 7}); !errors.Is(err, ErrInvalidAdminTelegramID) {
+		t.Fatalf("CreateInviteToken() error = %v, want %v", err, ErrInvalidAdminTelegramID)
 	}
 }
 

@@ -70,7 +70,7 @@ The command reads only `APP_ENV`, `DATABASE_PATH`, `DB_TIMEOUT`, and `LOG_LEVEL`
 
 - Startup rejects databases containing migration versions unknown to the running binary or checksums that do not match the embedded migration history.
 - Startup recovers every reminder left pending by the previous single process as `delivery_state_unknown`. During runtime, expired reminder leases receive the same classification.
-- After independently confirming that an ambiguous reminder was not delivered, the administrator can reopen it with `/admin reconcile <user-id> <YYYY-MM-DD> <reminder-type>`.
+- After independently confirming that an ambiguous reminder was not delivered, the administrator can reopen its exact delivery with `/admin reconcile <user-id> <YYYY-MM-DD> <reminder-type> [delivery-key]`; `delivery-key` is required for manual reminders (for example, `update:12345`). Reopened deliveries are processed from the retry queue independently of the original calendar day.
 - Payment drafts survive process restarts and are deleted only after the ledger write succeeds or the administrator cancels them.
 
 ## Test isolation

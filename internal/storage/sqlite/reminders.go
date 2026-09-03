@@ -12,15 +12,16 @@ import (
 
 const reserveReminderDelivery = `
 	INSERT INTO reminder_deliveries (
-		user_id, billing_date, reminder_type, delivery_key, scheduled_date, status,
+		user_id, billing_date, reminder_type, delivery_key, message_text, scheduled_date, status,
 		created_at, updated_at, attempt_count, next_attempt_at, lease_expires_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, ?)
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, ?)
 	ON CONFLICT(user_id, billing_date, reminder_type, delivery_key) DO UPDATE SET
 		scheduled_date = excluded.scheduled_date,
 		status = excluded.status,
 		sent_at = NULL,
 		telegram_message_id = NULL,
 		error_code = NULL,
+		message_text = excluded.message_text,
 		updated_at = excluded.updated_at,
 		attempt_count = reminder_deliveries.attempt_count + 1,
 		next_attempt_at = NULL,
@@ -48,6 +49,7 @@ func (s *Store) ReserveReminderDelivery(ctx context.Context, delivery domain.Rem
 		delivery.BillingDate.String(),
 		delivery.ReminderType,
 		delivery.DeliveryKey,
+		delivery.MessageText,
 		delivery.ScheduledDate.String(),
 		delivery.Status,
 		delivery.CreatedAt.UTC().Unix(),
@@ -172,19 +174,14 @@ func (s *Store) MarkPendingUnknown(ctx context.Context, updatedAt time.Time) (in
 const markUnknownRetryable = `
 	UPDATE reminder_deliveries
 	SET error_code = 'delivery_retryable', next_attempt_at = ?, updated_at = ?
-	WHERE rowid = (
-		SELECT rowid FROM reminder_deliveries
-		WHERE user_id = ? AND billing_date = ? AND reminder_type = ?
+	WHERE user_id = ? AND billing_date = ? AND reminder_type = ? AND delivery_key = ?
 		AND status = 'failed' AND error_code = 'delivery_state_unknown'
 		AND attempt_count < ?
-		ORDER BY updated_at DESC, delivery_key DESC
-		LIMIT 1
-	)
 `
 
 // MarkUnknownRetryable reopens an ambiguous row only after explicit confirmation
 // by a reconciliation caller that the original message was not sent.
-func (s *Store) MarkUnknownRetryable(ctx context.Context, userID domain.UserID, billingDate domain.Date, kind domain.ReminderType, updatedAt time.Time, maxAttempts int) (bool, error) {
+func (s *Store) MarkUnknownRetryable(ctx context.Context, userID domain.UserID, billingDate domain.Date, kind domain.ReminderType, deliveryKey string, updatedAt time.Time, maxAttempts int) (bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
@@ -196,6 +193,7 @@ func (s *Store) MarkUnknownRetryable(ctx context.Context, userID domain.UserID, 
 		userID,
 		billingDate.String(),
 		kind,
+		deliveryKey,
 		maxAttempts,
 	)
 	if err != nil {
@@ -210,7 +208,7 @@ func (s *Store) MarkUnknownRetryable(ctx context.Context, userID domain.UserID, 
 	return rows == 1, nil
 }
 
-const selectReminderDelivery = "SELECT billing_date, scheduled_date, status, sent_at, telegram_message_id, error_code, created_at, updated_at, attempt_count, lease_expires_at FROM reminder_deliveries WHERE user_id = ? AND billing_date = ? AND reminder_type = ? AND delivery_key = ?"
+const selectReminderDelivery = "SELECT billing_date, scheduled_date, status, sent_at, telegram_message_id, error_code, message_text, created_at, updated_at, attempt_count, lease_expires_at FROM reminder_deliveries WHERE user_id = ? AND billing_date = ? AND reminder_type = ? AND delivery_key = ?"
 
 func (s *Store) reminderDeliveryAttempt(ctx context.Context, userID domain.UserID, billingDate domain.Date, kind domain.ReminderType, deliveryKey string) (domain.ReminderDelivery, int, error) {
 	var (
@@ -225,7 +223,7 @@ func (s *Store) reminderDeliveryAttempt(ctx context.Context, userID domain.UserI
 	)
 
 	err := s.runner(ctx).QueryRowContext(ctx, selectReminderDelivery, userID, billingDate.String(), kind, deliveryKey).Scan(
-		&billing, &scheduled, &delivery.Status, &sentAt, &messageID, &errorCode, &createdAt, &updatedAt, &attempt, &leaseExpiresAt,
+		&billing, &scheduled, &delivery.Status, &sentAt, &messageID, &errorCode, &delivery.MessageText, &createdAt, &updatedAt, &attempt, &leaseExpiresAt,
 	)
 
 	if err != nil {
@@ -254,6 +252,105 @@ func (s *Store) reminderDeliveryAttempt(ctx context.Context, userID domain.UserI
 	delivery.LeaseExpiresAt = reminderTimePointer(leaseExpiresAt)
 
 	return delivery, attempt, nil
+}
+
+// RetryableReminderDeliveries returns due retries independently from today's
+// calendar-based automatic reminder selection.
+func (s *Store) RetryableReminderDeliveries(ctx context.Context, dueAt time.Time, maxAttempts, limit int) ([]reminder.RetryCandidate, error) {
+	ctx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+	if maxAttempts <= 0 || limit <= 0 {
+		return nil, fmt.Errorf("retryable reminder limits must be positive")
+	}
+
+	rows, err := s.runner(ctx).QueryContext(ctx, `
+		SELECT `+reminderCandidateUserColumns+`,
+			d.billing_date, d.reminder_type, d.delivery_key, d.message_text,
+			d.scheduled_date, d.status, d.sent_at, d.telegram_message_id,
+			d.error_code, d.created_at, d.updated_at, d.attempt_count, d.lease_expires_at
+		FROM reminder_deliveries AS d
+		JOIN users AS u ON u.id = d.user_id
+		WHERE d.status = 'failed'
+			AND d.error_code = 'delivery_retryable'
+			AND d.next_attempt_at IS NOT NULL
+			AND d.next_attempt_at <= ?
+			AND d.attempt_count < ?
+			AND (d.reminder_type = 'manual' OR u.status = 'active')
+		ORDER BY d.next_attempt_at ASC, d.user_id ASC, d.delivery_key ASC
+		LIMIT ?
+	`, dueAt.UTC().Unix(), maxAttempts, limit)
+	if err != nil {
+		return nil, fmt.Errorf("select retryable reminder deliveries: %w", err)
+	}
+	defer rows.Close()
+
+	candidates := make([]reminder.RetryCandidate, 0)
+	for rows.Next() {
+		candidate, err := scanRetryCandidate(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan retryable reminder delivery: %w", err)
+		}
+		candidates = append(candidates, candidate)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate retryable reminder deliveries: %w", err)
+	}
+	return candidates, nil
+}
+
+func scanRetryCandidate(scanner rowScanner) (reminder.RetryCandidate, error) {
+	var (
+		candidate                      reminder.RetryCandidate
+		telegramUserID, telegramChatID sql.NullInt64
+		username                       sql.NullString
+		nextChargeOn, billingDate      string
+		scheduledDate                  string
+		sentAt, messageID, lease       sql.NullInt64
+		errorCode                      sql.NullString
+		userCreatedAt, userUpdatedAt   int64
+		deliveryCreatedAt              int64
+		deliveryUpdatedAt              int64
+	)
+	err := scanner.Scan(
+		&candidate.User.ID, &telegramUserID, &telegramChatID, &username,
+		&candidate.User.DisplayName, &candidate.User.MonthlyFeeMinor,
+		&candidate.User.Currency, &candidate.User.BillingAnchorDay,
+		&nextChargeOn, &candidate.User.Status, &userCreatedAt, &userUpdatedAt,
+		&billingDate, &candidate.Delivery.ReminderType, &candidate.Delivery.DeliveryKey,
+		&candidate.Delivery.MessageText, &scheduledDate, &candidate.Delivery.Status,
+		&sentAt, &messageID, &errorCode, &deliveryCreatedAt, &deliveryUpdatedAt,
+		&candidate.Delivery.AttemptCount, &lease,
+	)
+	if err != nil {
+		return reminder.RetryCandidate{}, err
+	}
+
+	candidate.User.NextChargeOn, err = domain.ParseDate(nextChargeOn)
+	if err != nil {
+		return reminder.RetryCandidate{}, err
+	}
+	candidate.Delivery.BillingDate, err = domain.ParseDate(billingDate)
+	if err != nil {
+		return reminder.RetryCandidate{}, err
+	}
+	candidate.Delivery.ScheduledDate, err = domain.ParseDate(scheduledDate)
+	if err != nil {
+		return reminder.RetryCandidate{}, err
+	}
+
+	candidate.User.TelegramUserID = int64Pointer(telegramUserID)
+	candidate.User.TelegramChatID = int64Pointer(telegramChatID)
+	candidate.User.Username = stringPointer(username)
+	candidate.User.CreatedAt = time.Unix(userCreatedAt, 0).UTC()
+	candidate.User.UpdatedAt = time.Unix(userUpdatedAt, 0).UTC()
+	candidate.Delivery.UserID = candidate.User.ID
+	candidate.Delivery.SentAt = reminderTimePointer(sentAt)
+	candidate.Delivery.TelegramMessageID = int64Pointer(messageID)
+	candidate.Delivery.ErrorCode = stringPointer(errorCode)
+	candidate.Delivery.CreatedAt = time.Unix(deliveryCreatedAt, 0).UTC()
+	candidate.Delivery.UpdatedAt = time.Unix(deliveryUpdatedAt, 0).UTC()
+	candidate.Delivery.LeaseExpiresAt = reminderTimePointer(lease)
+	return candidate, nil
 }
 
 const reminderCandidateUserColumns = `

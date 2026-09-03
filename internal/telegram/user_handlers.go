@@ -178,8 +178,27 @@ func formatHistory(language localization.Language, entries []domain.LedgerEntry)
 			note = " — " + *entry.Note
 		}
 
-		lines = append(lines, fmt.Sprintf("%s · %s · %s %s%s", entry.OccurredAt.Format("2006-01-02"), entry.Kind, formatSignedAmountMinor(entry.AmountMinor), "RUB", note))
+		lines = append(lines, fmt.Sprintf("%s · %s · %s %s%s", entry.OccurredAt.Format("2006-01-02"), localizedLedgerKind(language, entry.Kind), formatSignedAmountMinor(entry.AmountMinor), "RUB", note))
 	}
 
 	return strings.Join(lines, "\n")
+}
+
+func localizedLedgerKind(language localization.Language, kind domain.LedgerKind) string {
+	var id string
+	switch kind {
+	case domain.LedgerKindOpeningBalance:
+		id = "LedgerKindOpeningBalance"
+	case domain.LedgerKindPayment:
+		id = "LedgerKindPayment"
+	case domain.LedgerKindSubscriptionCharge:
+		id = "LedgerKindSubscriptionCharge"
+	case domain.LedgerKindAdjustment:
+		id = "LedgerKindAdjustment"
+	case domain.LedgerKindReversal:
+		id = "LedgerKindReversal"
+	default:
+		return string(kind)
+	}
+	return localized(language, id)
 }

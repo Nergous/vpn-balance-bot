@@ -30,6 +30,13 @@ func TestMigrateCreatesInitialSchema(t *testing.T) {
 			t.Errorf("table %q was not created", name)
 		}
 	}
+	for _, name := range []string{
+		"idx_reminder_deliveries_due_retry",
+	} {
+		if !sqliteObjectExists(t, store, ctx, "index", name) {
+			t.Errorf("index %q was not created", name)
+		}
+	}
 
 	for _, name := range []string{
 		"idx_users_status_next_charge_on",

@@ -27,6 +27,10 @@ type pagedStorage interface {
 	ReminderCandidatesPage(context.Context, domain.Date, domain.UserID, int) ([]Candidate, bool, error)
 }
 
+type retryStorage interface {
+	RetryableReminderDeliveries(context.Context, time.Time, int, int) ([]RetryCandidate, error)
+}
+
 // Service selects, reserves, and delivers customer reminders.
 type Service struct {
 	storage  Storage
@@ -75,6 +79,9 @@ func (s *Service) Process(ctx context.Context, today domain.Date) (int, error) {
 
 	delivered := 0
 	var processErrors []error
+	retryCount, retryErrors := s.processRetryableDeliveries(ctx)
+	delivered += retryCount
+	processErrors = append(processErrors, retryErrors...)
 	if storage, ok := s.storage.(pagedStorage); ok {
 		var afterID domain.UserID
 		for {
@@ -101,6 +108,62 @@ func (s *Service) Process(ctx context.Context, today domain.Date) (int, error) {
 	}
 
 	return delivered, errors.Join(processErrors...)
+}
+
+func (s *Service) processRetryableDeliveries(ctx context.Context) (int, []error) {
+	storage, ok := s.storage.(retryStorage)
+	if !ok {
+		return 0, nil
+	}
+
+	delivered := 0
+	var processErrors []error
+	for {
+		now := s.now().UTC().Truncate(time.Second)
+		candidates, err := storage.RetryableReminderDeliveries(ctx, now, maxDeliveryAttempts, candidatePageSize)
+		if err != nil {
+			return delivered, append(processErrors, fmt.Errorf("list retryable reminder deliveries: %w", err))
+		}
+		if len(candidates) == 0 {
+			return delivered, processErrors
+		}
+
+		results := make(chan deliveryResult, len(candidates))
+		jobs := make(chan RetryCandidate)
+		workers := min(deliveryWorkers, len(candidates))
+		for range workers {
+			go func() {
+				for candidate := range jobs {
+					delivery := candidate.Delivery
+					text := delivery.MessageText
+					if text == "" {
+						text = automaticText(s.language, delivery.ReminderType)
+					}
+					created, err := s.deliver(ctx, candidate.User, delivery.BillingDate, delivery.ScheduledDate, delivery.ReminderType, delivery.DeliveryKey, text)
+					if err != nil {
+						err = fmt.Errorf("retry %s reminder for user %d key %q: %w", delivery.ReminderType, candidate.User.ID, delivery.DeliveryKey, err)
+					}
+					results <- deliveryResult{delivered: created, err: err}
+				}
+			}()
+		}
+		for _, candidate := range candidates {
+			jobs <- candidate
+		}
+		close(jobs)
+		for range candidates {
+			result := <-results
+			if result.delivered {
+				delivered++
+			}
+			if result.err != nil {
+				processErrors = append(processErrors, result.err)
+			}
+		}
+		if len(candidates) < candidatePageSize {
+			return delivered, processErrors
+		}
+	}
 }
 
 type deliveryResult struct {
@@ -175,6 +238,7 @@ func (s *Service) deliver(ctx context.Context, user domain.User, billingDate, sc
 		ScheduledDate:  scheduledDate,
 		ReminderType:   reminderType,
 		DeliveryKey:    deliveryKey,
+		MessageText:    text,
 		Status:         domain.ReminderStatusPending,
 		CreatedAt:      now,
 		UpdatedAt:      now,
@@ -237,12 +301,13 @@ func (s *Service) deliver(ctx context.Context, user domain.User, billingDate, sc
 
 // ConfirmUnknownNotSent makes an ambiguous delivery retryable only after an
 // operator or reconciliation process has confirmed that no message was sent.
-func (s *Service) ConfirmUnknownNotSent(ctx context.Context, userID domain.UserID, billingDate domain.Date, reminderType domain.ReminderType) (bool, error) {
+func (s *Service) ConfirmUnknownNotSent(ctx context.Context, userID domain.UserID, billingDate domain.Date, reminderType domain.ReminderType, deliveryKey string) (bool, error) {
 	return s.storage.MarkUnknownRetryable(
 		ctx,
 		userID,
 		billingDate,
 		reminderType,
+		deliveryKey,
 		s.now().UTC().Truncate(time.Second),
 		maxDeliveryAttempts,
 	)

@@ -84,6 +84,15 @@ func (b *Bot) reportClientError(err error) {
 	)
 }
 
+func (b *Bot) reportDroppedUpdate(updateID int64, err error, attempts int) {
+	b.logger.Error("Telegram update dropped after handler failure",
+		slog.Int64("update_id", updateID),
+		slog.Int("attempts", attempts),
+		slog.String("error_type", fmt.Sprintf("%T", err)),
+		slog.String("error_kind", safeErrorKind(err)),
+	)
+}
+
 func safeErrorKind(err error) string {
 	switch {
 	case errors.Is(err, context.Canceled):

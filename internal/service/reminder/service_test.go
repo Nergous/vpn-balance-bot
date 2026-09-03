@@ -203,32 +203,68 @@ func TestProcessUsesLatestChargedPeriodAfterCatchUp(t *testing.T) {
 	}
 }
 
+func TestProcessRetriesQueuedDeliveryOutsideOriginalCalendarDay(t *testing.T) {
+	chatID := int64(10)
+	billingDate := mustDate(t, 2026, time.September, 1)
+	today := mustDate(t, 2026, time.September, 3)
+	storage := &fakeStorage{
+		reserved: true,
+		attempt:  2,
+		retryCandidates: []RetryCandidate{{
+			User: domain.User{ID: 1, TelegramChatID: &chatID},
+			Delivery: domain.ReminderDelivery{
+				UserID: 1, BillingDate: billingDate, ScheduledDate: billingDate,
+				ReminderType: domain.ReminderTypeManual, DeliveryKey: "update:42",
+				MessageText: "custom reminder", Status: domain.ReminderStatusFailed,
+			},
+		}},
+	}
+	sender := &fakeSender{messageID: 7}
+	service, _ := New(storage, sender, localization.Russian)
+	service.now = func() time.Time { return time.Date(2026, time.September, 3, 9, 0, 0, 0, time.UTC) }
+
+	delivered, err := service.Process(context.Background(), today)
+	if err != nil || delivered != 1 || sender.calls != 1 {
+		t.Fatalf("Process() = %d, %v, sender calls=%d", delivered, err, sender.calls)
+	}
+	if len(storage.reservations) != 1 || storage.reservations[0].DeliveryKey != "update:42" || storage.reservations[0].MessageText != "custom reminder" {
+		t.Fatalf("reservation = %#v", storage.reservations)
+	}
+}
+
 func TestConfirmUnknownNotSentUsesExplicitReconciliation(t *testing.T) {
 	date := mustDate(t, 2026, time.September, 1)
 	storage := &fakeStorage{unknownMarked: true}
 	service, _ := New(storage, &fakeSender{}, localization.Russian)
 
-	marked, err := service.ConfirmUnknownNotSent(context.Background(), 1, date, domain.ReminderTypeManual)
-	if err != nil || !marked || storage.unknownCalls != 1 {
-		t.Fatalf("ConfirmUnknownNotSent() = %t, %v, calls=%d", marked, err, storage.unknownCalls)
+	marked, err := service.ConfirmUnknownNotSent(context.Background(), 1, date, domain.ReminderTypeManual, "update:42")
+	if err != nil || !marked || storage.unknownCalls != 1 || storage.unknownKey != "update:42" {
+		t.Fatalf("ConfirmUnknownNotSent() = %t, %v, calls=%d, key=%q", marked, err, storage.unknownCalls, storage.unknownKey)
 	}
 }
 
 type fakeStorage struct {
-	reserved      bool
-	attempt       int
-	reservations  []domain.ReminderDelivery
-	updated       []domain.ReminderDelivery
-	retryAt       []*time.Time
-	updateErr     error
-	candidates    []Candidate
-	candidateErr  error
-	unknownMarked bool
-	unknownCalls  int
+	reserved        bool
+	attempt         int
+	reservations    []domain.ReminderDelivery
+	updated         []domain.ReminderDelivery
+	retryAt         []*time.Time
+	updateErr       error
+	candidates      []Candidate
+	candidateErr    error
+	retryCandidates []RetryCandidate
+	unknownMarked   bool
+	unknownCalls    int
+	unknownKey      string
 }
 
 func (f *fakeStorage) ReminderCandidates(context.Context, domain.Date) ([]Candidate, error) {
 	return f.candidates, f.candidateErr
+}
+func (f *fakeStorage) RetryableReminderDeliveries(context.Context, time.Time, int, int) ([]RetryCandidate, error) {
+	candidates := f.retryCandidates
+	f.retryCandidates = nil
+	return candidates, nil
 }
 func (f *fakeStorage) ReserveReminderDelivery(_ context.Context, d domain.ReminderDelivery, _ int) (domain.ReminderDelivery, int, bool, error) {
 	f.reservations = append(f.reservations, d)
@@ -247,8 +283,9 @@ func (f *fakeStorage) MarkPendingUnknown(context.Context, time.Time) (int, error
 func (f *fakeStorage) MarkAllPendingUnknown(context.Context, time.Time) (int, error) {
 	return 0, nil
 }
-func (f *fakeStorage) MarkUnknownRetryable(context.Context, domain.UserID, domain.Date, domain.ReminderType, time.Time, int) (bool, error) {
+func (f *fakeStorage) MarkUnknownRetryable(_ context.Context, _ domain.UserID, _ domain.Date, _ domain.ReminderType, deliveryKey string, _ time.Time, _ int) (bool, error) {
 	f.unknownCalls++
+	f.unknownKey = deliveryKey
 	return f.unknownMarked, nil
 }
 

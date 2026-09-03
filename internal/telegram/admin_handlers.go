@@ -29,11 +29,11 @@ type AdminAccountService interface {
 	CreateUser(context.Context, account.CreateUserParams) (domain.User, error)
 	UserByID(context.Context, domain.UserID) (domain.User, error)
 	ListUsers(context.Context, account.UserFilter) ([]domain.User, error)
-	CreateInviteToken(context.Context, domain.UserID) (string, error)
+	CreateInviteToken(context.Context, account.CreateInviteTokenParams) (string, error)
 	ChangeMonthlyFee(context.Context, account.ChangeMonthlyFeeParams) (domain.User, error)
-	Pause(context.Context, domain.UserID) (domain.User, error)
+	Pause(context.Context, account.AdminUserParams) (domain.User, error)
 	Resume(context.Context, account.ResumeParams) (domain.User, error)
-	Disable(context.Context, domain.UserID) (domain.User, error)
+	Disable(context.Context, account.AdminUserParams) (domain.User, error)
 	AddPayment(context.Context, account.AddPaymentParams) (domain.LedgerEntry, error)
 	Balance(context.Context, domain.UserID) (domain.AmountMinor, error)
 	AddOpeningBalance(context.Context, account.AddOpeningBalanceParams) (domain.LedgerEntry, error)
@@ -49,7 +49,7 @@ type adminQueryService interface {
 // AdminReminderService delivers an explicit reminder through the shared delivery flow.
 type AdminReminderService interface {
 	DeliverManual(context.Context, domain.User, int64, string) (bool, error)
-	ConfirmUnknownNotSent(context.Context, domain.UserID, domain.Date, domain.ReminderType) (bool, error)
+	ConfirmUnknownNotSent(context.Context, domain.UserID, domain.Date, domain.ReminderType, string) (bool, error)
 }
 
 // Admin adapts authenticated administrator commands to service use cases.
@@ -97,7 +97,10 @@ func (a *Admin) CreateInvite(ctx context.Context, message IncomingMessage, userI
 		return a.reject(ctx, message.ChatID)
 	}
 
-	token, err := a.accounts.CreateInviteToken(ctx, userID)
+	token, err := a.accounts.CreateInviteToken(ctx, account.CreateInviteTokenParams{
+		AdminTelegramID: message.UserID,
+		UserID:          userID,
+	})
 	if err != nil {
 		return err
 	}
@@ -140,12 +143,12 @@ func (a *Admin) RemindNow(ctx context.Context, message IncomingMessage, userID d
 
 // ReconcileReminder reopens an ambiguous reminder only after the administrator
 // has verified that Telegram did not deliver the original message.
-func (a *Admin) ReconcileReminder(ctx context.Context, message IncomingMessage, userID domain.UserID, billingDate domain.Date, reminderType domain.ReminderType) error {
+func (a *Admin) ReconcileReminder(ctx context.Context, message IncomingMessage, userID domain.UserID, billingDate domain.Date, reminderType domain.ReminderType, deliveryKey string) error {
 	if !a.authorized(message) {
 		return a.reject(ctx, message.ChatID)
 	}
 
-	marked, err := a.reminders.ConfirmUnknownNotSent(ctx, userID, billingDate, reminderType)
+	marked, err := a.reminders.ConfirmUnknownNotSent(ctx, userID, billingDate, reminderType, deliveryKey)
 	if err != nil {
 		return err
 	}
@@ -300,6 +303,7 @@ func (a *Admin) CreateUser(ctx context.Context, message IncomingMessage, params 
 		return domain.User{}, ErrAdminOnly
 	}
 
+	params.AdminTelegramID = message.UserID
 	return a.accounts.CreateUser(ctx, params)
 }
 
@@ -369,7 +373,7 @@ func (a *Admin) Pause(ctx context.Context, message IncomingMessage, userID domai
 		return a.reject(ctx, message.ChatID)
 	}
 
-	if _, err := a.accounts.Pause(ctx, userID); err != nil {
+	if _, err := a.accounts.Pause(ctx, account.AdminUserParams{AdminTelegramID: message.UserID, UserID: userID}); err != nil {
 		return err
 	}
 	return a.completed(ctx, message.ChatID)
@@ -380,7 +384,7 @@ func (a *Admin) Disable(ctx context.Context, message IncomingMessage, userID dom
 		return a.reject(ctx, message.ChatID)
 	}
 
-	if _, err := a.accounts.Disable(ctx, userID); err != nil {
+	if _, err := a.accounts.Disable(ctx, account.AdminUserParams{AdminTelegramID: message.UserID, UserID: userID}); err != nil {
 		return err
 	}
 	return a.completed(ctx, message.ChatID)
@@ -391,6 +395,7 @@ func (a *Admin) Resume(ctx context.Context, message IncomingMessage, params acco
 		return a.reject(ctx, message.ChatID)
 	}
 
+	params.AdminTelegramID = message.UserID
 	if _, err := a.accounts.Resume(ctx, params); err != nil {
 		return err
 	}
@@ -402,6 +407,7 @@ func (a *Admin) ChangeFee(ctx context.Context, message IncomingMessage, params a
 		return a.reject(ctx, message.ChatID)
 	}
 
+	params.AdminTelegramID = message.UserID
 	if _, err := a.accounts.ChangeMonthlyFee(ctx, params); err != nil {
 		return err
 	}
@@ -784,7 +790,7 @@ func (b *Bot) handleRemindCommand(ctx context.Context, message IncomingMessage, 
 }
 
 func (b *Bot) handleReconcileCommand(ctx context.Context, message IncomingMessage, parts []string) error {
-	if len(parts) != 5 {
+	if len(parts) < 5 || len(parts) > 6 {
 		return b.send(ctx, message.ChatID, localized(b.language, "ReconcileUsage"))
 	}
 	userID, err := adminUserID(b.language, parts, 2)
@@ -799,7 +805,14 @@ func (b *Bot) handleReconcileCommand(ctx context.Context, message IncomingMessag
 	if !reminderType.IsValid() {
 		return b.send(ctx, message.ChatID, localized(b.language, "ReminderTypeInvalid"))
 	}
-	return b.admin.ReconcileReminder(ctx, message, userID, billingDate, reminderType)
+	deliveryKey := ""
+	if len(parts) == 6 {
+		deliveryKey = parts[5]
+	}
+	if reminderType == domain.ReminderTypeManual && deliveryKey == "" {
+		return b.send(ctx, message.ChatID, localized(b.language, "ReconcileUsage"))
+	}
+	return b.admin.ReconcileReminder(ctx, message, userID, billingDate, reminderType, deliveryKey)
 }
 
 func adminUserID(language localization.Language, parts []string, index int) (domain.UserID, error) {

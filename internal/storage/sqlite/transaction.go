@@ -9,6 +9,8 @@ import (
 
 type transactionContextKey struct{}
 
+const processedTelegramUpdateRetention = 10_000
+
 type databaseRunner interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
@@ -79,6 +81,17 @@ func (s *Store) ProcessTelegramUpdate(ctx context.Context, updateID int64, handl
 		}
 		if err := handler(txCtx); err != nil {
 			return err
+		}
+		if _, err := tx.ExecContext(txCtx, `
+			DELETE FROM processed_telegram_updates
+			WHERE update_id < COALESCE((
+				SELECT update_id
+				FROM processed_telegram_updates
+				ORDER BY update_id DESC
+				LIMIT 1 OFFSET ?
+			), -1)
+		`, processedTelegramUpdateRetention-1); err != nil {
+			return fmt.Errorf("prune processed Telegram updates: %w", err)
 		}
 		processed = true
 		return nil

@@ -71,6 +71,41 @@ func TestAdminDashboardAndCreateUser(t *testing.T) {
 	}
 }
 
+func TestAdminPassesActorIDToProfileServiceBoundary(t *testing.T) {
+	client := &testutil.FakeTelegramClient{}
+	service := &fakeAdmin{}
+	admin := NewAdmin(client, service, &fakeAdminReminders{}, 17, LanguageEnglish)
+	message := IncomingMessage{ChatID: 17, UserID: 17, ChatType: ChatTypePrivate}
+	date, _ := domain.NewDate(2026, time.September, 3)
+
+	if _, err := admin.CreateUser(context.Background(), message, account.CreateUserParams{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.CreateInvite(context.Background(), message, 7); err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.ChangeFee(context.Background(), message, account.ChangeMonthlyFeeParams{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.Pause(context.Background(), message, 7); err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.Resume(context.Background(), message, account.ResumeParams{NextChargeOn: &date}); err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.Disable(context.Background(), message, 7); err != nil {
+		t.Fatal(err)
+	}
+	if len(service.actorIDs) != 6 {
+		t.Fatalf("actor IDs = %#v", service.actorIDs)
+	}
+	for _, actorID := range service.actorIDs {
+		if actorID != 17 {
+			t.Fatalf("actor IDs = %#v", service.actorIDs)
+		}
+	}
+}
+
 func TestAdminUsesBoundedQueryCapabilities(t *testing.T) {
 	client := &testutil.FakeTelegramClient{}
 	service := &fakeAdminQueries{
@@ -218,11 +253,36 @@ func TestAdminManualReminderRequiresAdminAndUsesReminderService(t *testing.T) {
 	}
 }
 
+func TestAdminReconcileRequiresAndForwardsExactManualDeliveryKey(t *testing.T) {
+	client := &testutil.FakeTelegramClient{}
+	reminders := &fakeAdminReminders{}
+	bot := NewWithClient(client, &fakeAdmin{}, LanguageEnglish)
+	if err := bot.EnableAdmin(1, reminders); err != nil {
+		t.Fatal(err)
+	}
+	message := IncomingMessage{ChatID: 1, UserID: 1, ChatType: ChatTypePrivate}
+	message.Text = "/admin reconcile 7 2026-09-03 manual"
+	if err := bot.HandleAdminCommand(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	if reminders.reconcileCalls != 0 {
+		t.Fatal("manual reconciliation without delivery key reached service")
+	}
+	message.Text = "/admin reconcile 7 2026-09-03 manual update:42"
+	if err := bot.HandleAdminCommand(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	if reminders.reconcileCalls != 1 || reminders.reconcileKey != "update:42" {
+		t.Fatalf("reconciliation calls=%d key=%q", reminders.reconcileCalls, reminders.reconcileKey)
+	}
+}
+
 type fakeAdmin struct {
 	pauseCalls, paymentCalls int
 	paymentErr               error
 	pauseErr                 error
 	paymentParams            account.AddPaymentParams
+	actorIDs                 []int64
 }
 
 type fakeAdminQueries struct {
@@ -260,7 +320,8 @@ func (f *fakeAdmin) Balance(context.Context, domain.UserID) (domain.AmountMinor,
 func (f *fakeAdmin) LastLedgerEntries(context.Context, domain.UserID) ([]domain.LedgerEntry, error) {
 	return nil, nil
 }
-func (f *fakeAdmin) CreateUser(context.Context, account.CreateUserParams) (domain.User, error) {
+func (f *fakeAdmin) CreateUser(_ context.Context, params account.CreateUserParams) (domain.User, error) {
+	f.actorIDs = append(f.actorIDs, params.AdminTelegramID)
 	return domain.User{ID: 8, DisplayName: "Created"}, nil
 }
 func (f *fakeAdmin) UserByID(_ context.Context, userID domain.UserID) (domain.User, error) {
@@ -269,20 +330,25 @@ func (f *fakeAdmin) UserByID(_ context.Context, userID domain.UserID) (domain.Us
 func (f *fakeAdmin) ListUsers(context.Context, account.UserFilter) ([]domain.User, error) {
 	return nil, nil
 }
-func (f *fakeAdmin) CreateInviteToken(context.Context, domain.UserID) (string, error) {
+func (f *fakeAdmin) CreateInviteToken(_ context.Context, params account.CreateInviteTokenParams) (string, error) {
+	f.actorIDs = append(f.actorIDs, params.AdminTelegramID)
 	return "token", nil
 }
-func (f *fakeAdmin) ChangeMonthlyFee(context.Context, account.ChangeMonthlyFeeParams) (domain.User, error) {
+func (f *fakeAdmin) ChangeMonthlyFee(_ context.Context, params account.ChangeMonthlyFeeParams) (domain.User, error) {
+	f.actorIDs = append(f.actorIDs, params.AdminTelegramID)
 	return domain.User{}, nil
 }
-func (f *fakeAdmin) Pause(context.Context, domain.UserID) (domain.User, error) {
+func (f *fakeAdmin) Pause(_ context.Context, params account.AdminUserParams) (domain.User, error) {
+	f.actorIDs = append(f.actorIDs, params.AdminTelegramID)
 	f.pauseCalls++
 	return domain.User{}, f.pauseErr
 }
-func (f *fakeAdmin) Resume(context.Context, account.ResumeParams) (domain.User, error) {
+func (f *fakeAdmin) Resume(_ context.Context, params account.ResumeParams) (domain.User, error) {
+	f.actorIDs = append(f.actorIDs, params.AdminTelegramID)
 	return domain.User{}, nil
 }
-func (f *fakeAdmin) Disable(context.Context, domain.UserID) (domain.User, error) {
+func (f *fakeAdmin) Disable(_ context.Context, params account.AdminUserParams) (domain.User, error) {
+	f.actorIDs = append(f.actorIDs, params.AdminTelegramID)
 	return domain.User{}, nil
 }
 func (f *fakeAdmin) AddPayment(_ context.Context, params account.AddPaymentParams) (domain.LedgerEntry, error) {
@@ -301,9 +367,11 @@ func (f *fakeAdmin) ReverseLedgerEntry(context.Context, account.ReverseLedgerEnt
 }
 
 type fakeAdminReminders struct {
-	calls int
-	user  domain.User
-	text  string
+	calls          int
+	user           domain.User
+	text           string
+	reconcileCalls int
+	reconcileKey   string
 }
 
 func (f *fakeAdminReminders) DeliverManual(_ context.Context, user domain.User, _ int64, text string) (bool, error) {
@@ -312,6 +380,8 @@ func (f *fakeAdminReminders) DeliverManual(_ context.Context, user domain.User, 
 	return true, nil
 }
 
-func (f *fakeAdminReminders) ConfirmUnknownNotSent(context.Context, domain.UserID, domain.Date, domain.ReminderType) (bool, error) {
+func (f *fakeAdminReminders) ConfirmUnknownNotSent(_ context.Context, _ domain.UserID, _ domain.Date, _ domain.ReminderType, deliveryKey string) (bool, error) {
+	f.reconcileCalls++
+	f.reconcileKey = deliveryKey
 	return true, nil
 }

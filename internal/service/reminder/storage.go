@@ -14,6 +14,12 @@ type Candidate struct {
 	LatestChargePeriodOn *domain.Date
 }
 
+// RetryCandidate contains one due delivery and the user required to resend it.
+type RetryCandidate struct {
+	User     domain.User
+	Delivery domain.ReminderDelivery
+}
+
 // Storage defines persistence operations required by reminder delivery.
 type Storage interface {
 	ReminderCandidates(context.Context, domain.Date) ([]Candidate, error)
@@ -21,5 +27,5 @@ type Storage interface {
 	UpdateReminderDeliveryAttempt(context.Context, domain.ReminderDelivery, int, *time.Time) (bool, error)
 	MarkAllPendingUnknown(context.Context, time.Time) (int, error)
 	MarkPendingUnknown(context.Context, time.Time) (int, error)
-	MarkUnknownRetryable(context.Context, domain.UserID, domain.Date, domain.ReminderType, time.Time, int) (bool, error)
+	MarkUnknownRetryable(context.Context, domain.UserID, domain.Date, domain.ReminderType, string, time.Time, int) (bool, error)
 }

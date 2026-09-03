@@ -15,6 +15,7 @@ logs/
 bin/
 dist/
 *.test
+*.exe
 coverage.out
 coverage.html
 

@@ -14,7 +14,10 @@ import (
 const inviteTokenBytes = 32
 
 // CreateInviteToken creates one raw, expiring token for a profile.
-func (s *Service) CreateInviteToken(ctx context.Context, userID domain.UserID) (string, error) {
+func (s *Service) CreateInviteToken(ctx context.Context, params CreateInviteTokenParams) (string, error) {
+	if err := validateAdminTelegramID(params.AdminTelegramID); err != nil {
+		return "", err
+	}
 	token, err := generateInviteToken()
 	if err != nil {
 		return "", err
@@ -23,7 +26,7 @@ func (s *Service) CreateInviteToken(ctx context.Context, userID domain.UserID) (
 	createdAt := s.nowUTC()
 	err = s.storage.CreateInviteToken(ctx, CreateInviteTokenRecord{
 		TokenHash: hashInviteToken(token),
-		UserID:    userID,
+		UserID:    params.UserID,
 		ExpiresAt: createdAt.Add(s.inviteTTL),
 		CreatedAt: createdAt,
 	})

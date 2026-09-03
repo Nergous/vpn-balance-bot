@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -33,12 +34,15 @@ type Client interface {
 type poller interface{ Start(context.Context) }
 
 type productionClient struct {
-	bot        *botapi.Bot
-	adapter    *Bot
-	httpClient *http.Client
-	pollURL    string
-	pollWait   int
+	bot            *botapi.Bot
+	adapter        *Bot
+	httpClient     *http.Client
+	pollURL        string
+	pollWait       int
+	updateAttempts map[int64]int
 }
+
+const maxUpdateAttempts = 3
 
 func (c *productionClient) SendText(ctx context.Context, chatID int64, text string) (int, error) {
 	var lastMessageID int
@@ -95,14 +99,65 @@ func (c *productionClient) Start(ctx context.Context) {
 		}
 		backoff = 0
 		for _, update := range updates {
+			if update == nil {
+				continue
+			}
 			if err := c.adapter.processUpdate(ctx, update, c.bot); err != nil {
+				if ctx.Err() != nil {
+					return
+				}
 				c.adapter.reportUpdateError(update, err)
+				if c.acknowledgeFailedUpdate(update.ID, err) {
+					offset = update.ID + 1
+					continue
+				}
 				backoff = nextPollBackoff(backoff)
 				break
 			}
+			delete(c.updateAttempts, update.ID)
 			offset = update.ID + 1
 		}
 	}
+}
+
+func (c *productionClient) acknowledgeFailedUpdate(updateID int64, err error) bool {
+	if !isRetryableUpdateError(err) {
+		delete(c.updateAttempts, updateID)
+		c.adapter.reportDroppedUpdate(updateID, err, 1)
+		return true
+	}
+	if c.updateAttempts == nil {
+		c.updateAttempts = make(map[int64]int)
+	}
+	c.updateAttempts[updateID]++
+	if c.updateAttempts[updateID] < maxUpdateAttempts {
+		return false
+	}
+	attempts := c.updateAttempts[updateID]
+	delete(c.updateAttempts, updateID)
+	c.adapter.reportDroppedUpdate(updateID, err, attempts)
+	return true
+}
+
+func isRetryableUpdateError(err error) bool {
+	switch {
+	case err == nil:
+		return false
+	case errors.Is(err, ErrPrivateChatRequired),
+		errors.Is(err, ErrUnauthorized),
+		errors.Is(err, ErrAdminOnly),
+		errors.Is(err, ErrTransactionalSend),
+		errors.Is(err, botapi.ErrorBadRequest),
+		errors.Is(err, botapi.ErrorForbidden),
+		errors.Is(err, botapi.ErrorUnauthorized),
+		errors.Is(err, botapi.ErrorNotFound):
+		return false
+	case botapi.IsTooManyRequestsError(err),
+		errors.Is(err, context.DeadlineExceeded):
+		return true
+	}
+	var networkError net.Error
+	return errors.As(err, &networkError) || !errors.Is(err, context.Canceled)
 }
 
 func nextPollBackoff(previous time.Duration) time.Duration {
@@ -161,11 +216,12 @@ func newProductionBot(token string, adapter *Bot, httpTimeout time.Duration) (*p
 		return nil, initializeError{cause: err}
 	}
 	return &productionClient{
-		bot:        b,
-		adapter:    adapter,
-		httpClient: httpClient,
-		pollURL:    "https://api.telegram.org/bot" + token + "/getUpdates",
-		pollWait:   max(1, int(httpTimeout.Seconds())-1),
+		bot:            b,
+		adapter:        adapter,
+		httpClient:     httpClient,
+		pollURL:        "https://api.telegram.org/bot" + token + "/getUpdates",
+		pollWait:       max(1, int(httpTimeout.Seconds())-1),
+		updateAttempts: make(map[int64]int),
 	}, nil
 }
 

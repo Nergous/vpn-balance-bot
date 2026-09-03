@@ -48,3 +48,22 @@ func TestProcessTelegramUpdateDeduplicatesAndRollsBackFailures(t *testing.T) {
 		t.Fatalf("balance = %d, %v, want 100", balance, err)
 	}
 }
+
+func TestProcessTelegramUpdatePrunesOldClaims(t *testing.T) {
+	ctx := context.Background()
+	store := newLedgerStore(t, ctx)
+	for updateID := int64(1); updateID <= processedTelegramUpdateRetention+1; updateID++ {
+		processed, err := store.ProcessTelegramUpdate(ctx, updateID, func(context.Context) error { return nil })
+		if err != nil || !processed {
+			t.Fatalf("update %d = %t, %v", updateID, processed, err)
+		}
+	}
+	var count int
+	var oldest int64
+	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*), MIN(update_id) FROM processed_telegram_updates").Scan(&count, &oldest); err != nil {
+		t.Fatal(err)
+	}
+	if count != processedTelegramUpdateRetention || oldest != 2 {
+		t.Fatalf("retained count=%d oldest=%d", count, oldest)
+	}
+}

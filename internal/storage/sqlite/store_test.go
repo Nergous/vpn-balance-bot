@@ -77,6 +77,19 @@ func TestNewRejectsUnavailablePath(t *testing.T) {
 	}
 }
 
+func TestNewCreatesMissingDatabaseDirectory(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "data", "nested", "vpn-balance-bot.db")
+	store, err := New(ctx, path, time.Second)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if _, err := os.Stat(filepath.Dir(path)); err != nil {
+		t.Fatalf("database directory: %v", err)
+	}
+}
+
 func TestNewRespectsCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

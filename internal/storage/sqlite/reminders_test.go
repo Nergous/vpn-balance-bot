@@ -59,7 +59,7 @@ func TestReminderDeliveryRetryAndAttemptFencing(t *testing.T) {
 		t.Fatal(err)
 	}
 	lease := now.Add(time.Minute)
-	delivery := domain.ReminderDelivery{UserID: user.ID, BillingDate: date, ScheduledDate: date, ReminderType: domain.ReminderTypeManual, DeliveryKey: "update:42", Status: domain.ReminderStatusPending, CreatedAt: now, UpdatedAt: now, LeaseExpiresAt: &lease}
+	delivery := domain.ReminderDelivery{UserID: user.ID, BillingDate: date, ScheduledDate: date, ReminderType: domain.ReminderTypeManual, DeliveryKey: "update:42", MessageText: "retry me", Status: domain.ReminderStatusPending, CreatedAt: now, UpdatedAt: now, LeaseExpiresAt: &lease}
 	reserved, attempt, created, err := store.ReserveReminderDelivery(ctx, delivery, 3)
 	if err != nil || !created || attempt != 1 {
 		t.Fatalf("reserve = %#v, %d, %t, %v", reserved, attempt, created, err)
@@ -70,6 +70,10 @@ func TestReminderDeliveryRetryAndAttemptFencing(t *testing.T) {
 	retryAt := now.Add(time.Minute)
 	if updated, err := store.UpdateReminderDeliveryAttempt(ctx, delivery, 1, &retryAt); err != nil || !updated {
 		t.Fatalf("failure update = %t, %v", updated, err)
+	}
+	due, err := store.RetryableReminderDeliveries(ctx, retryAt, 3, 10)
+	if err != nil || len(due) != 1 || due[0].Delivery.DeliveryKey != "update:42" || due[0].Delivery.MessageText != "retry me" {
+		t.Fatalf("due retries = %#v, %v", due, err)
 	}
 	delivery.UpdatedAt = now.Add(30 * time.Second)
 	if _, _, created, err := store.ReserveReminderDelivery(ctx, delivery, 3); err != nil || created {
@@ -93,6 +97,44 @@ func TestReminderDeliveryRetryAndAttemptFencing(t *testing.T) {
 	if recovered, err := store.MarkPendingUnknown(ctx, lease2); err != nil || recovered != 1 {
 		t.Fatalf("expired lease recovery = %d, %v", recovered, err)
 	}
+}
+
+func TestMarkUnknownRetryableRequiresExactDeliveryKey(t *testing.T) {
+	ctx := context.Background()
+	store := newMigratedStore(t, ctx)
+	date := mustSQLiteDate(t, 2026, time.September, 3)
+	now := time.Date(2026, time.September, 3, 10, 0, 0, 0, time.UTC)
+	user, err := store.CreateUser(ctx, domain.User{DisplayName: "Manual", MonthlyFeeMinor: 100, Currency: "RUB", BillingAnchorDay: 3, NextChargeOn: date, Status: domain.UserStatusActive, CreatedAt: now, UpdatedAt: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"update:41", "update:42"} {
+		lease := now.Add(time.Minute)
+		delivery := domain.ReminderDelivery{UserID: user.ID, BillingDate: date, ScheduledDate: date, ReminderType: domain.ReminderTypeManual, DeliveryKey: key, MessageText: key, Status: domain.ReminderStatusPending, CreatedAt: now, UpdatedAt: now, LeaseExpiresAt: &lease}
+		if _, _, reserved, err := store.ReserveReminderDelivery(ctx, delivery, 3); err != nil || !reserved {
+			t.Fatalf("reserve %s = %t, %v", key, reserved, err)
+		}
+	}
+	if _, err := store.MarkAllPendingUnknown(ctx, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	marked, err := store.MarkUnknownRetryable(ctx, user.ID, date, domain.ReminderTypeManual, "update:41", now.Add(2*time.Minute), 3)
+	if err != nil || !marked {
+		t.Fatalf("MarkUnknownRetryable() = %t, %v", marked, err)
+	}
+	due, err := store.RetryableReminderDeliveries(ctx, now.Add(2*time.Minute), 3, 10)
+	if err != nil || len(due) != 1 || due[0].Delivery.DeliveryKey != "update:41" {
+		t.Fatalf("due = %#v, %v", due, err)
+	}
+}
+
+func mustSQLiteDate(t *testing.T, year int, month time.Month, day int) domain.Date {
+	t.Helper()
+	date, err := domain.NewDate(year, month, day)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return date
 }
 
 func TestMarkAllPendingUnknownRecoversUnexpiredLeaseAtStartup(t *testing.T) {

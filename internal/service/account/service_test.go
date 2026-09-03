@@ -27,11 +27,11 @@ func TestCreateUserValidatesParams(t *testing.T) {
 		params CreateUserParams
 		want   error
 	}{
-		{name: "blank display name", params: CreateUserParams{MonthlyFeeMinor: 1, Currency: "RUB", BillingAnchorDay: 1, NextChargeOn: nextChargeOn}, want: ErrInvalidDisplayName},
-		{name: "zero fee", params: CreateUserParams{DisplayName: "Alice", Currency: "RUB", BillingAnchorDay: 1, NextChargeOn: nextChargeOn}, want: ErrInvalidMonthlyFee},
-		{name: "unsupported currency", params: CreateUserParams{DisplayName: "Alice", MonthlyFeeMinor: 1, Currency: "USD", BillingAnchorDay: 1, NextChargeOn: nextChargeOn}, want: ErrUnsupportedCurrency},
-		{name: "invalid anchor", params: CreateUserParams{DisplayName: "Alice", MonthlyFeeMinor: 1, Currency: "RUB", BillingAnchorDay: 32, NextChargeOn: nextChargeOn}, want: ErrInvalidAnchorDay},
-		{name: "invalid date", params: CreateUserParams{DisplayName: "Alice", MonthlyFeeMinor: 1, Currency: "RUB", BillingAnchorDay: 1, NextChargeOn: domain.Date{Year: 2026, Month: time.February, Day: 30}}, want: ErrInvalidNextChargeOn},
+		{name: "blank display name", params: CreateUserParams{AdminTelegramID: 1, MonthlyFeeMinor: 1, Currency: "RUB", BillingAnchorDay: 1, NextChargeOn: nextChargeOn}, want: ErrInvalidDisplayName},
+		{name: "zero fee", params: CreateUserParams{AdminTelegramID: 1, DisplayName: "Alice", Currency: "RUB", BillingAnchorDay: 1, NextChargeOn: nextChargeOn}, want: ErrInvalidMonthlyFee},
+		{name: "unsupported currency", params: CreateUserParams{AdminTelegramID: 1, DisplayName: "Alice", MonthlyFeeMinor: 1, Currency: "USD", BillingAnchorDay: 1, NextChargeOn: nextChargeOn}, want: ErrUnsupportedCurrency},
+		{name: "invalid anchor", params: CreateUserParams{AdminTelegramID: 1, DisplayName: "Alice", MonthlyFeeMinor: 1, Currency: "RUB", BillingAnchorDay: 32, NextChargeOn: nextChargeOn}, want: ErrInvalidAnchorDay},
+		{name: "invalid date", params: CreateUserParams{AdminTelegramID: 1, DisplayName: "Alice", MonthlyFeeMinor: 1, Currency: "RUB", BillingAnchorDay: 1, NextChargeOn: domain.Date{Year: 2026, Month: time.February, Day: 30}}, want: ErrInvalidNextChargeOn},
 	}
 
 	for _, test := range tests {
@@ -65,6 +65,7 @@ func TestCreateUserBuildsActiveProfile(t *testing.T) {
 	service := newService(storage, time.Hour, func() time.Time { return now })
 
 	created, err := service.CreateUser(context.Background(), CreateUserParams{
+		AdminTelegramID:  7,
 		TelegramUserID:   &telegramUserID,
 		TelegramChatID:   &telegramChatID,
 		Username:         &username,
@@ -217,16 +218,16 @@ func TestServiceForwardsReadAndProfileCommands(t *testing.T) {
 	if _, err := service.ListUsers(context.Background(), UserFilter{Status: &status}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.ChangeMonthlyFee(context.Background(), ChangeMonthlyFeeParams{UserID: 1, MonthlyFeeMinor: 250000}); err != nil {
+	if _, err := service.ChangeMonthlyFee(context.Background(), ChangeMonthlyFeeParams{AdminTelegramID: 7, UserID: 1, MonthlyFeeMinor: 250000}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.Pause(context.Background(), 1); err != nil {
+	if _, err := service.Pause(context.Background(), AdminUserParams{AdminTelegramID: 7, UserID: 1}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.Resume(context.Background(), ResumeParams{UserID: 1, NextChargeOn: &nextChargeOn}); err != nil {
+	if _, err := service.Resume(context.Background(), ResumeParams{AdminTelegramID: 7, UserID: 1, NextChargeOn: &nextChargeOn}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.Disable(context.Background(), 1); err != nil {
+	if _, err := service.Disable(context.Background(), AdminUserParams{AdminTelegramID: 7, UserID: 1}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -234,20 +235,48 @@ func TestServiceForwardsReadAndProfileCommands(t *testing.T) {
 func TestServiceRejectsInvalidProfileCommands(t *testing.T) {
 	service := newService(&fakeStorage{}, time.Hour, time.Now)
 
-	_, err := service.ChangeMonthlyFee(context.Background(), ChangeMonthlyFeeParams{MonthlyFeeMinor: 0})
+	_, err := service.ChangeMonthlyFee(context.Background(), ChangeMonthlyFeeParams{AdminTelegramID: 1, MonthlyFeeMinor: 0})
 	if !errors.Is(err, ErrInvalidMonthlyFee) {
 		t.Fatalf("ChangeMonthlyFee() error = %v, want %v", err, ErrInvalidMonthlyFee)
 	}
 
-	_, err = service.Resume(context.Background(), ResumeParams{UserID: 1})
+	_, err = service.Resume(context.Background(), ResumeParams{AdminTelegramID: 1, UserID: 1})
 	if !errors.Is(err, ErrResumeDateRequired) {
 		t.Fatalf("Resume() error = %v, want %v", err, ErrResumeDateRequired)
 	}
 
 	invalidDate := domain.Date{Year: 2026, Month: time.February, Day: 30}
-	_, err = service.Resume(context.Background(), ResumeParams{UserID: 1, NextChargeOn: &invalidDate})
+	_, err = service.Resume(context.Background(), ResumeParams{AdminTelegramID: 1, UserID: 1, NextChargeOn: &invalidDate})
 	if !errors.Is(err, ErrInvalidNextChargeOn) {
 		t.Fatalf("Resume() error = %v, want %v", err, ErrInvalidNextChargeOn)
+	}
+}
+
+func TestProfileMutationsRejectMissingAdminActor(t *testing.T) {
+	service := newService(&fakeStorage{}, time.Hour, time.Now)
+	date := testDate(t, 2026, time.September, 3)
+	tests := []struct {
+		name string
+		call func() error
+	}{
+		{"create", func() error { _, err := service.CreateUser(context.Background(), CreateUserParams{}); return err }},
+		{"fee", func() error {
+			_, err := service.ChangeMonthlyFee(context.Background(), ChangeMonthlyFeeParams{})
+			return err
+		}},
+		{"pause", func() error { _, err := service.Pause(context.Background(), AdminUserParams{}); return err }},
+		{"resume", func() error {
+			_, err := service.Resume(context.Background(), ResumeParams{NextChargeOn: &date})
+			return err
+		}},
+		{"disable", func() error { _, err := service.Disable(context.Background(), AdminUserParams{}); return err }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.call(); !errors.Is(err, ErrInvalidAdminTelegramID) {
+				t.Fatalf("error = %v, want %v", err, ErrInvalidAdminTelegramID)
+			}
+		})
 	}
 }
 

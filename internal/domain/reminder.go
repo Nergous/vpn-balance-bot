@@ -54,6 +54,7 @@ type ReminderDelivery struct {
 	BillingDate       Date
 	ReminderType      ReminderType
 	DeliveryKey       string
+	MessageText       string
 	ScheduledDate     Date
 	Status            ReminderStatus
 	SentAt            *time.Time

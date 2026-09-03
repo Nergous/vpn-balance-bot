@@ -26,6 +26,7 @@ type PaymentDraftStorage interface {
 
 // CreateUserParams contains inputs for a new customer billing profile.
 type CreateUserParams struct {
+	AdminTelegramID  int64
 	TelegramUserID   *int64
 	TelegramChatID   *int64
 	Username         *string
@@ -55,14 +56,28 @@ type UserStatusCounts struct {
 
 // ChangeMonthlyFeeParams contains a profile-only tariff change.
 type ChangeMonthlyFeeParams struct {
+	AdminTelegramID int64
 	UserID          domain.UserID
 	MonthlyFeeMinor domain.AmountMinor
 }
 
 // ResumeParams requires the next billing date after a paused profile resumes.
 type ResumeParams struct {
-	UserID       domain.UserID
-	NextChargeOn *domain.Date
+	AdminTelegramID int64
+	UserID          domain.UserID
+	NextChargeOn    *domain.Date
+}
+
+// AdminUserParams identifies an administrator and one profile mutation target.
+type AdminUserParams struct {
+	AdminTelegramID int64
+	UserID          domain.UserID
+}
+
+// CreateInviteTokenParams identifies the administrator creating an invite.
+type CreateInviteTokenParams struct {
+	AdminTelegramID int64
+	UserID          domain.UserID
 }
 
 // ConsumeInviteParams contains a raw token presented by a Telegram account.

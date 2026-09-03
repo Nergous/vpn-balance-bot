@@ -28,6 +28,10 @@ var migrations = []Migration{
 		Version: "003_runtime_hardening.sql",
 		SQL:     runtimeHardeningSQL,
 	},
+	{
+		Version: "004_delivery_queue_retention.sql",
+		SQL:     deliveryQueueRetentionSQL,
+	},
 }
 
 //go:embed 001_initial.sql
@@ -38,6 +42,9 @@ var reminderDeliveryRetriesSQL string
 
 //go:embed 003_runtime_hardening.sql
 var runtimeHardeningSQL string
+
+//go:embed 004_delivery_queue_retention.sql
+var deliveryQueueRetentionSQL string
 
 func (m Migration) Checksum() string {
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(m.SQL)))

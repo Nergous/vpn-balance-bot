@@ -74,8 +74,24 @@ func TestHistoryUsesAtMostTenEntries(t *testing.T) {
 	if err := bot.HandleHistory(context.Background(), IncomingMessage{ChatID: 1, UserID: 1, ChatType: ChatTypePrivate}); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Count(client.Sent[0].Text, "payment") != 10 {
+	if strings.Count(client.Sent[0].Text, "Платёж") != 10 || strings.Contains(client.Sent[0].Text, "payment") {
 		t.Fatalf("history = %q", client.Sent[0].Text)
+	}
+}
+
+func TestHistoryLocalizesEveryLedgerKind(t *testing.T) {
+	entries := []domain.LedgerEntry{
+		{Kind: domain.LedgerKindOpeningBalance},
+		{Kind: domain.LedgerKindPayment},
+		{Kind: domain.LedgerKindSubscriptionCharge},
+		{Kind: domain.LedgerKindAdjustment},
+		{Kind: domain.LedgerKindReversal},
+	}
+	got := formatHistory(LanguageRussian, entries)
+	for _, expected := range []string{"Начальный баланс", "Платёж", "Списание подписки", "Корректировка", "Отмена операции"} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("history missing %q: %q", expected, got)
+		}
 	}
 }
 

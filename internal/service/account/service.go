@@ -42,6 +42,9 @@ func newService(storage Storage, inviteTTL time.Duration, now func() time.Time) 
 
 // CreateUser validates and creates an active customer billing profile.
 func (s *Service) CreateUser(ctx context.Context, params CreateUserParams) (domain.User, error) {
+	if err := validateAdminTelegramID(params.AdminTelegramID); err != nil {
+		return domain.User{}, err
+	}
 	displayName, err := validateCreateUserParams(params)
 
 	if err != nil {
@@ -146,6 +149,9 @@ func (s *Service) UserStatusCounts(ctx context.Context) (UserStatusCounts, error
 
 // ChangeMonthlyFee updates a customer's recurring monthly charge.
 func (s *Service) ChangeMonthlyFee(ctx context.Context, params ChangeMonthlyFeeParams) (domain.User, error) {
+	if err := validateAdminTelegramID(params.AdminTelegramID); err != nil {
+		return domain.User{}, err
+	}
 	if params.MonthlyFeeMinor <= 0 {
 		return domain.User{}, ErrInvalidMonthlyFee
 	}
@@ -154,12 +160,18 @@ func (s *Service) ChangeMonthlyFee(ctx context.Context, params ChangeMonthlyFeeP
 }
 
 // Pause suspends automatic billing for a customer profile.
-func (s *Service) Pause(ctx context.Context, userID domain.UserID) (domain.User, error) {
-	return s.storage.PauseUser(ctx, userID, s.nowUTC())
+func (s *Service) Pause(ctx context.Context, params AdminUserParams) (domain.User, error) {
+	if err := validateAdminTelegramID(params.AdminTelegramID); err != nil {
+		return domain.User{}, err
+	}
+	return s.storage.PauseUser(ctx, params.UserID, s.nowUTC())
 }
 
 // Resume reactivates a profile from the supplied next billing date.
 func (s *Service) Resume(ctx context.Context, params ResumeParams) (domain.User, error) {
+	if err := validateAdminTelegramID(params.AdminTelegramID); err != nil {
+		return domain.User{}, err
+	}
 	if params.NextChargeOn == nil {
 		return domain.User{}, ErrResumeDateRequired
 	}
@@ -171,8 +183,11 @@ func (s *Service) Resume(ctx context.Context, params ResumeParams) (domain.User,
 }
 
 // Disable permanently removes a customer profile from active billing.
-func (s *Service) Disable(ctx context.Context, userID domain.UserID) (domain.User, error) {
-	return s.storage.DisableUser(ctx, userID, s.nowUTC())
+func (s *Service) Disable(ctx context.Context, params AdminUserParams) (domain.User, error) {
+	if err := validateAdminTelegramID(params.AdminTelegramID); err != nil {
+		return domain.User{}, err
+	}
+	return s.storage.DisableUser(ctx, params.UserID, s.nowUTC())
 }
 
 // SavePaymentDraft persists an administrator payment draft when supported by storage.
@@ -230,6 +245,13 @@ func (s *Service) ProcessTelegramUpdate(ctx context.Context, updateID int64, han
 
 func (s *Service) nowUTC() time.Time {
 	return s.now().UTC().Truncate(time.Second)
+}
+
+func validateAdminTelegramID(adminTelegramID int64) error {
+	if adminTelegramID <= 0 {
+		return ErrInvalidAdminTelegramID
+	}
+	return nil
 }
 
 func validateCreateUserParams(params CreateUserParams) (string, error) {
