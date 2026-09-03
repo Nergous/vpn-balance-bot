@@ -1,9 +1,10 @@
-name: Go CI
+name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -15,29 +16,124 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@db41740e12847bb616a339b75eb9414e711417df # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@403833af8e5981a13ba72a4e90025743050557ca # v7.0.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
+          cache-dependency-path: go.sum
 
-      - name: Check formatting
-        shell: bash
-        run: test -z "$(gofmt -l .)"
+      - name: Check formatting and module files
+        run: make fmt-check tidy-check
 
-      - name: Download dependencies
-        run: go mod download
+      - name: Validate GitHub Actions workflows
+        run: make actionlint
 
-      - name: Run go vet
-        run: go vet ./...
+      - name: Run static analysis
+        run: make vet
 
       - name: Run tests with race detector
-        run: go test -race ./...
+        run: make test-race
 
       - name: Build application
-        run: go build ./cmd/vpn-balance-bot
+        run: make build
+
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Run golangci-lint
+        run: make lint
+
+  coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Generate coverage report
+        run: make coverage-check
+
+      - name: Upload coverage profile
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: go-coverage
+          path: |
+            .audit-cache/coverage.out
+            .audit-cache/coverage.html
+          if-no-files-found: error
+          retention-days: 14
+
+  vulnerability-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Scan reachable Go vulnerabilities
+        run: make vuln
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run tests in Docker build stage
+        run: docker build --target test .
+
+      - name: Build runtime image
+        run: docker build --target runtime -t vpn-balance-bot:ci .
+
+      - name: Check runtime metadata
+        run: |
+          test "$(docker image inspect vpn-balance-bot:ci --format '{{.Config.User}}')" = "65532:65532"
+          docker image inspect vpn-balance-bot:ci --format '{{json .Config.Healthcheck}}' | grep -q 'doctor'
+          docker run --rm --network none vpn-balance-bot:ci version

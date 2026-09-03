@@ -130,7 +130,7 @@ func TestBackupExcludesUncommittedChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx, `INSERT INTO users (display_name, monthly_fee_minor, currency, billing_anchor_day, next_charge_on, status, created_at, updated_at) VALUES ('Uncommitted', 100, 'RUB', 1, '2026-09-01', 'active', 0, 0)`); err != nil {
 		t.Fatal(err)
 	}

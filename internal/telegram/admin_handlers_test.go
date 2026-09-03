@@ -36,7 +36,7 @@ func TestPaymentWizardConfirmsOnce(t *testing.T) {
 	if service.paymentCalls != 1 {
 		t.Fatalf("payment calls=%d", service.paymentCalls)
 	}
-	if err := wizard.ConfirmPayment(context.Background(), 1, service); err != ErrWizardNotFound {
+	if err := wizard.ConfirmPayment(context.Background(), 1, service); !errors.Is(err, ErrWizardNotFound) {
 		t.Fatalf("second confirmation=%v", err)
 	}
 }

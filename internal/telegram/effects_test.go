@@ -90,7 +90,10 @@ func TestUpdateFailurePolicyBoundsTransientRetriesAndDropsPermanentErrors(t *tes
 	bot := NewWithClient(&transactionAwareClient{}, &fakeAdmin{}, LanguageEnglish)
 	client := &productionClient{adapter: bot, updateAttempts: make(map[int64]int)}
 	transient := errors.New("database unavailable")
-	if client.acknowledgeFailedUpdate(42, transient) || client.acknowledgeFailedUpdate(42, transient) {
+	if client.acknowledgeFailedUpdate(42, transient) {
+		t.Fatal("transient update acknowledged before retry limit")
+	}
+	if client.acknowledgeFailedUpdate(42, transient) {
 		t.Fatal("transient update acknowledged before retry limit")
 	}
 	if !client.acknowledgeFailedUpdate(42, transient) {

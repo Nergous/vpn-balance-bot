@@ -155,7 +155,7 @@ func (s *Store) applyMigration(ctx context.Context, migration migrations.Migrati
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	var applied bool
 	if err := tx.QueryRowContext(ctx, `

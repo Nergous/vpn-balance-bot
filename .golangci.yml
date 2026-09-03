@@ -1,0 +1,25 @@
+version: "2"
+
+run:
+  timeout: 5m
+  go: "1.26"
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - durationcheck
+    - errorlint
+    - noctx
+    - sqlclosecheck
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+
+formatters:
+  enable:
+    - gofmt

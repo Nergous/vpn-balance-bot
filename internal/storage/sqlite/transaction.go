@@ -41,7 +41,7 @@ func (s *Store) withTransaction(ctx context.Context, operation string, fn func(c
 	if err != nil {
 		return fmt.Errorf("start %s transaction: %w", operation, err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	txCtx := context.WithValue(ctx, transactionContextKey{}, tx)
 	if err := fn(txCtx, tx); err != nil {
