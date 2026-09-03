@@ -1,0 +1,49 @@
+name: Support question
+description: Ask about installation, configuration, backup, restore, or operation.
+title: "[Support]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Read `SUPPORT.md` and the operations documentation first. Security issues must use private vulnerability reporting.
+
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What are you trying to accomplish?
+    validations:
+      required: true
+
+  - type: textarea
+    id: attempted
+    attributes:
+      label: What have you tried?
+      description: Include the documentation and commands already used.
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: Version, OS, architecture, deployment method
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Redacted diagnostics
+      description: Include relevant output without secrets, personal data, production database contents, or private paths.
+      render: shell
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety confirmation
+      options:
+        - label: I removed tokens, credentials, customer information, databases, backups, and other private data.
+          required: true
+        - label: This question does not disclose a security vulnerability.
+          required: true

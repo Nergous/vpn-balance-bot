@@ -1,0 +1,85 @@
+name: Bug report
+description: Report a reproducible defect in the bot, database, or deployment.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Search existing issues first. For security vulnerabilities, stop and use the private security reporting link instead.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Paste `vpn-balance-bot version` output or the exact commit SHA.
+      placeholder: v1.2.3 or commit SHA
+    validations:
+      required: true
+
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment method
+      options:
+        - Docker Compose
+        - Standalone binary with systemd
+        - Standalone binary without systemd
+        - Development checkout
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, architecture, and Docker version when applicable.
+      placeholder: Ubuntu 24.04, linux/amd64, Docker 28.x
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Describe the observed behavior and its impact.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Use synthetic data and the smallest reproducible sequence.
+      placeholder: |
+        1. Start with ...
+        2. Run ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Redacted diagnostics
+      description: Include `doctor`, `migrate-status`, or relevant logs. Remove all secrets and private data.
+      render: shell
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety checklist
+      options:
+        - label: I removed Telegram tokens, personal data, production database contents, backups, and sensitive filesystem paths.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true
+        - label: I searched existing issues for duplicates.
+          required: true
