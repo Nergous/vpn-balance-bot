@@ -1,11 +1,11 @@
 [Unit]
 Description=VPN Balance Telegram Bot
-Documentation=file:/opt/vpn-balance-bot/docs/operations.md
+Documentation=https://github.com/Nergous/vpn-balance-bot/blob/master/docs/operations.md
 Wants=network-online.target
 After=network-online.target
 
 [Service]
-Type=simple
+Type=exec
 User=vpn-balance-bot
 Group=vpn-balance-bot
 WorkingDirectory=/opt/vpn-balance-bot

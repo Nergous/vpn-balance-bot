@@ -1,10 +1,56 @@
 # Production operations
 
-This runbook targets a single Linux host managed by systemd. The service must run as a dedicated unprivileged account and must be the only process writing the SQLite database.
+VPN Balance Bot supports two single-host deployment models:
 
-## Install
+- Docker Compose with a named SQLite volume.
+- A native Linux binary managed by systemd.
 
-Build and verify the binary before copying it to the host:
+Both models must run exactly one bot process against one database. Do not mount
+the same SQLite database into multiple running application containers or services.
+
+Before using production credentials, complete the acceptance checklist with a
+dedicated test bot and an isolated database.
+
+## Docker Compose
+
+Create the configuration:
+
+```bash
+git clone https://github.com/Nergous/vpn-balance-bot.git
+cd vpn-balance-bot
+cp .env.example .env
+chmod 600 .env
+```
+
+Set `TELEGRAM_BOT_TOKEN` and `ADMIN_TELEGRAM_ID`. Compose overrides
+`APP_ENV` and `DATABASE_PATH` so the container always uses production config
+and the `/data` volume.
+
+Build and start:
+
+```bash
+docker compose config
+docker compose build
+docker compose up -d
+docker compose ps
+docker compose logs --tail 100 bot
+```
+
+The service publishes no ports. It only makes outbound HTTPS requests to the
+Telegram Bot API.
+
+Stop without deleting the database:
+
+```bash
+docker compose down
+```
+
+Never add `--volumes` to this command unless permanent database deletion is
+explicitly intended and a verified external backup exists.
+
+## Native systemd service
+
+Build and verify the binary:
 
 ```bash
 go test ./...
@@ -24,7 +70,8 @@ sudo install -o root -g root -m 0755 vpn-balance-bot /opt/vpn-balance-bot/vpn-ba
 sudo install -o root -g root -m 0644 deploy/vpn-balance-bot.service /etc/systemd/system/vpn-balance-bot.service
 ```
 
-Create `/etc/vpn-balance-bot/vpn-balance-bot.env` with mode `0640`, owner `root`, and group `vpn-balance-bot`:
+Create `/etc/vpn-balance-bot/vpn-balance-bot.env` with owner
+`root:vpn-balance-bot` and mode `0640`:
 
 ```dotenv
 APP_ENV=production
@@ -40,7 +87,8 @@ HTTP_TIMEOUT=30s
 DB_TIMEOUT=30s
 ```
 
-Do not place quotes around systemd environment-file values. Keep the token out of shell history, source control, command lines, and support logs.
+Do not quote systemd environment-file values. Keep the bot token out of shell
+history, source control, command lines, and support logs.
 
 Validate and start:
 
@@ -52,72 +100,89 @@ sudo systemctl status vpn-balance-bot.service
 sudo journalctl -u vpn-balance-bot.service -n 100 --no-pager
 ```
 
-Startup validates the Telegram token, applies embedded migrations, rejects unknown or checksum-mismatched migrations, and recovers interrupted reminder deliveries as ambiguous rather than resending them automatically.
+The unit runs as an unprivileged account with a strict filesystem sandbox,
+private temporary directory, no Linux capabilities, and write access only to its
+state directory.
 
-## Acceptance check
+## Acceptance checklist
 
-Use a dedicated test bot and a fresh non-production database for the first host-level rehearsal. Verify:
+Use a dedicated test bot and a fresh non-production database:
 
-1. The service reaches `active (running)` and logs `application started`.
-2. A non-admin cannot use `/admin` commands.
-3. The configured administrator can create a user and invitation.
+1. Startup reaches running state and logs `application started`.
+2. A non-admin cannot use any `/admin` command.
+3. The administrator can create a customer and a single-use invitation.
 4. The invited account can use `/status` and `/history`.
-5. A payment confirmation shows user, amount, UTC date, comment, and explicit confirm/cancel commands.
-6. `/admin` shows debtors, insufficient balances, unlinked profiles, and unreachable recipients.
-7. Restarting the service does not duplicate a confirmed payment or reminder.
+5. A payment remains a draft until explicit confirmation.
+6. Restarting does not duplicate the confirmed payment.
+7. Automatic and manual reminders do not duplicate after restart.
+8. A backup can replace a deleted test database and restart successfully.
+9. The previous binary and pre-upgrade backup complete a rollback rehearsal.
 
-Only after this rehearsal should the production token and production database path be configured.
+Only after the checklist passes should production credentials and data be used.
 
-## Backup
+## Upgrade
 
-Never copy the live `.db`, `-wal`, or `-shm` files. The built-in command creates a consistent snapshot, validates SQLite integrity and foreign keys, refuses to overwrite an existing destination, and publishes with restrictive permissions.
+Always create an external verified backup first.
+
+Docker Compose:
 
 ```bash
-sudo install -d -o vpn-balance-bot -g vpn-balance-bot -m 0700 /var/backups/vpn-balance-bot
-sudo -u vpn-balance-bot /usr/bin/env \
-  APP_ENV=production \
-  DATABASE_PATH=/var/lib/vpn-balance-bot/vpn-balance-bot.db \
-  DB_TIMEOUT=30s \
-  LOG_LEVEL=info \
-  /opt/vpn-balance-bot/vpn-balance-bot backup \
-  /var/backups/vpn-balance-bot/backup-2026-09-03.db
+docker compose build --pull
+docker compose up -d
+docker compose ps
+docker compose logs --tail 100 bot
 ```
 
-Copy completed snapshots to storage outside the host and periodically perform a restore rehearsal.
-
-## Upgrade and rollback
-
-Before every upgrade, create a verified backup. Keep the previously deployed binary until acceptance succeeds.
+systemd:
 
 ```bash
 sudo systemctl stop vpn-balance-bot.service
-sudo cp --preserve=mode,ownership /opt/vpn-balance-bot/vpn-balance-bot /opt/vpn-balance-bot/vpn-balance-bot.previous
-sudo install -o root -g root -m 0755 vpn-balance-bot /opt/vpn-balance-bot/vpn-balance-bot
+sudo cp --preserve=mode,ownership \
+  /opt/vpn-balance-bot/vpn-balance-bot \
+  /opt/vpn-balance-bot/vpn-balance-bot.previous
+sudo install -o root -g root -m 0755 \
+  vpn-balance-bot \
+  /opt/vpn-balance-bot/vpn-balance-bot
 sudo systemctl start vpn-balance-bot.service
 sudo systemctl status vpn-balance-bot.service
 ```
 
-If startup or acceptance fails, stop the service, restore `vpn-balance-bot.previous`, and start it again. If the new binary applied a migration that the previous binary does not recognize, restore the pre-upgrade database snapshot as described below; do not edit migration tables manually.
+Startup validates the token, applies embedded migrations, and rejects unknown or
+checksum-mismatched migration history.
 
-## Restore rehearsal or recovery
+## Rollback
 
-1. Stop the service and confirm no process has the database open.
-2. Preserve the current database directory for forensic recovery.
-3. Install a verified snapshot as `/var/lib/vpn-balance-bot/vpn-balance-bot.db` with owner `vpn-balance-bot:vpn-balance-bot` and mode `0600`.
-4. Remove stale `-wal` and `-shm` files only from the stopped service's database directory.
-5. Start the service and inspect startup logs. Migration checksum failure or an unknown migration means the snapshot and binary do not belong to the same release history.
-6. Repeat the acceptance check before reopening normal administration.
+If no new migration was applied, return to the previous image or binary and
+restart. If a new migration was applied, restore both:
 
-## Monitoring and incident response
+1. The previous image or binary.
+2. The verified pre-upgrade database snapshot.
 
-Useful commands:
+Do not edit `schema_migrations` or migration checksum rows manually.
+
+## Monitoring
+
+Docker:
+
+```bash
+docker compose ps
+docker compose logs --since 1h bot
+docker inspect --format '{{.RestartCount}}' "$(docker compose ps -q bot)"
+```
+
+systemd:
 
 ```bash
 sudo systemctl is-active vpn-balance-bot.service
+sudo systemctl show vpn-balance-bot.service -p NRestarts
 sudo journalctl -u vpn-balance-bot.service --since "1 hour ago" --no-pager
-sudo systemctl restart vpn-balance-bot.service
 ```
 
-Alert on repeated restarts, `scheduler run failed`, migration failures, backup failures, and growth in the dashboard's unreachable count. Handler logs intentionally contain correlation identifiers and error classes, not Telegram message text, tokens, comments, or filesystem paths.
+Alert on repeated restarts, migration failures, backup failures,
+`scheduler run failed`, and growth in unreachable recipients.
 
-For an ambiguous reminder delivery, first verify independently that Telegram did not deliver it, then use `/admin reconcile <user-id> <YYYY-MM-DD> <reminder-type>`. Do not reconcile merely to silence an error.
+## Related runbooks
+
+- [Backup and restore](backup-and-restore.md)
+- [Troubleshooting](troubleshooting.md)
+- [Database design](database.md)

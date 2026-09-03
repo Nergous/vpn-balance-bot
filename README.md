@@ -181,6 +181,8 @@ Telegram API.
 ## Deployment and operations
 
 - [Production operations](docs/operations.md)
+- [Backup and restore](docs/backup-and-restore.md)
+- [Troubleshooting](docs/troubleshooting.md)
 - [systemd service](deploy/vpn-balance-bot.service)
 - [Docker Compose](compose.yml)
 - [Architecture](docs/architecture.md)
